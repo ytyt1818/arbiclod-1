@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: arbiclod-1
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python arbiclod1.py --sheets $GOOGLE_SHEET_URL
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GOOGLE_SHEET_URL
+        sync: false
