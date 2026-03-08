@@ -6,6 +6,7 @@ Features:
 - Heartbeat (alive) messages
 - Telegram group support
 - Google Sheets integration
+- Flask web server for Render Keep-Alive
 """
 import asyncio
 import random
@@ -14,6 +15,8 @@ from datetime import datetime, timedelta
 import requests
 import logging
 from pathlib import Path
+from threading import Thread
+from flask import Flask
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +27,29 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Flask app for keep-alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Arbiclod-1 is running! 🚀"
+
+@app.route('/ping')
+def ping():
+    return "OK", 200
+
+@app.route('/status')
+def status():
+    return {
+        "status": "alive",
+        "bot": "Arbiclod-1",
+        "timestamp": datetime.now().isoformat()
+    }
+
+def run_flask():
+    """Run Flask in a separate thread"""
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
 
 class Arbiclod1:
     def __init__(self, use_google_sheets=False, sheet_url=None):
@@ -502,7 +528,13 @@ Ready to find arbitrage opportunities! 🎯
                 await asyncio.sleep(10)
     
     def run(self):
-        """Start the bot"""
+        """Start the bot with Flask server"""
+        # Start Flask server in background thread
+        logger.info("🌐 Starting Flask web server on port 8080...")
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Start bot
         try:
             asyncio.run(self.monitor_loop())
         except KeyboardInterrupt:
