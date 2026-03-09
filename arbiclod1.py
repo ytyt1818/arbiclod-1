@@ -89,7 +89,24 @@ class Arbiclod1:
         logger.info(f"📊 Loading config from: {config_file}")
         
         # Read the unified control panel
-        df = pd.read_excel(config_file, sheet_name='Arbiclod-1 Control')
+        df = pd.read_excel(config_file, sheet_name=0)  # First sheet
+        
+        # Detect column names (support both Hebrew and English)
+        col_mapping = {}
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            if 'הגדרה' in col_lower or 'setting' in col_lower:
+                col_mapping['setting'] = col
+            elif 'ערך' in col_lower or 'value' in col_lower:
+                col_mapping['value'] = col
+        
+        # Check if we found the columns
+        if 'setting' not in col_mapping or 'value' not in col_mapping:
+            logger.error(f"Could not find required columns. Available columns: {df.columns.tolist()}")
+            raise ValueError("Missing required columns in Excel file")
+        
+        setting_col = col_mapping['setting']
+        value_col = col_mapping['value']
         
         # Parse settings
         self.config = {
@@ -100,10 +117,10 @@ class Arbiclod1:
         
         current_section = None
         for _, row in df.iterrows():
-            if pd.isna(row['Setting']):
+            if pd.isna(row[setting_col]):
                 continue
                 
-            setting = str(row['Setting']).strip()
+            setting = str(row[setting_col]).strip()
             
             # Detect sections (support both English and Hebrew)
             if '🤖' in setting or 'BOT CONFIGURATION' in setting or 'הגדרות בוט' in setting:
@@ -123,14 +140,14 @@ class Arbiclod1:
             
             # Parse values
             if current_section == 'settings':
-                value = row['Value']
+                value = row[value_col]
                 self.config['settings'][setting] = value
             elif current_section == 'exchanges':
-                enabled = str(row['Value']).strip().upper() == 'V'
+                enabled = str(row[value_col]).strip().upper() == 'V'
                 if enabled:
                     self.config['exchanges'][setting] = True
             elif current_section == 'symbols':
-                enabled = str(row['Value']).strip().upper() == 'V'
+                enabled = str(row[value_col]).strip().upper() == 'V'
                 if enabled:
                     self.config['symbols'][setting] = True
     
@@ -152,6 +169,23 @@ class Arbiclod1:
         try:
             df = pd.read_csv(url)
             
+            # Detect column names (support both Hebrew and English)
+            col_mapping = {}
+            for col in df.columns:
+                col_lower = str(col).lower().strip()
+                if 'הגדרה' in col_lower or 'setting' in col_lower:
+                    col_mapping['setting'] = col
+                elif 'ערך' in col_lower or 'value' in col_lower:
+                    col_mapping['value'] = col
+            
+            # Check if we found the columns
+            if 'setting' not in col_mapping or 'value' not in col_mapping:
+                logger.error(f"Could not find required columns. Available columns: {df.columns.tolist()}")
+                raise ValueError("Missing required columns in Google Sheet")
+            
+            setting_col = col_mapping['setting']
+            value_col = col_mapping['value']
+            
             self.config = {
                 'settings': {},
                 'exchanges': {},
@@ -160,10 +194,10 @@ class Arbiclod1:
             
             current_section = None
             for _, row in df.iterrows():
-                if pd.isna(row['Setting']):
+                if pd.isna(row[setting_col]):
                     continue
                     
-                setting = str(row['Setting']).strip()
+                setting = str(row[setting_col]).strip()
                 
                 # Detect sections (support both English and Hebrew)
                 if '🤖' in setting or 'BOT CONFIGURATION' in setting or 'הגדרות בוט' in setting:
@@ -183,14 +217,14 @@ class Arbiclod1:
                 
                 # Parse values
                 if current_section == 'settings':
-                    value = row['Value']
+                    value = row[value_col]
                     self.config['settings'][setting] = value
                 elif current_section == 'exchanges':
-                    enabled = str(row['Value']).strip().upper() == 'V'
+                    enabled = str(row[value_col]).strip().upper() == 'V'
                     if enabled:
                         self.config['exchanges'][setting] = True
                 elif current_section == 'symbols':
-                    enabled = str(row['Value']).strip().upper() == 'V'
+                    enabled = str(row[value_col]).strip().upper() == 'V'
                     if enabled:
                         self.config['symbols'][setting] = True
                         
