@@ -167,24 +167,31 @@ class Arbiclod1:
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
         
         try:
-            df = pd.read_csv(url)
+            # Read with header at row 2 (index 2, which is row 3 in Excel/Sheets)
+            df = pd.read_csv(url, header=2)
+            
+            logger.info(f"Loaded sheet. Columns: {df.columns.tolist()}")
             
             # Detect column names (support both Hebrew and English)
             col_mapping = {}
             for col in df.columns:
-                col_lower = str(col).lower().strip()
-                if 'הגדרה' in col_lower or 'setting' in col_lower:
+                col_str = str(col).strip()
+                col_lower = col_str.lower()
+                if 'הגדרה' in col_str or 'setting' in col_lower:
                     col_mapping['setting'] = col
-                elif 'ערך' in col_lower or 'value' in col_lower:
+                elif 'ערך' in col_str or 'value' in col_lower:
                     col_mapping['value'] = col
             
             # Check if we found the columns
             if 'setting' not in col_mapping or 'value' not in col_mapping:
                 logger.error(f"Could not find required columns. Available columns: {df.columns.tolist()}")
+                logger.error(f"First few rows:\n{df.head()}")
                 raise ValueError("Missing required columns in Google Sheet")
             
             setting_col = col_mapping['setting']
             value_col = col_mapping['value']
+            
+            logger.info(f"Using columns: Setting='{setting_col}', Value='{value_col}'")
             
             self.config = {
                 'settings': {},
