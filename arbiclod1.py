@@ -49,7 +49,10 @@ def status():
 
 def run_flask():
     """Run Flask in a separate thread"""
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    import os
+    # Disable Flask development mode warnings
+    os.environ['FLASK_ENV'] = 'production'
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False, threaded=True)
 
 class Arbiclod1:
     def __init__(self, use_google_sheets=False, sheet_url=None):
