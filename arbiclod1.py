@@ -167,31 +167,10 @@ class Arbiclod1:
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
         
         try:
-            # Read with header at row 2 (index 2, which is row 3 in Excel/Sheets)
-            df = pd.read_csv(url, header=2)
+            # Read without header, we'll use fixed positions
+            df = pd.read_csv(url, header=None)
             
-            logger.info(f"Loaded sheet. Columns: {df.columns.tolist()}")
-            
-            # Detect column names (support both Hebrew and English)
-            col_mapping = {}
-            for col in df.columns:
-                col_str = str(col).strip()
-                col_lower = col_str.lower()
-                if 'הגדרה' in col_str or 'setting' in col_lower:
-                    col_mapping['setting'] = col
-                elif 'ערך' in col_str or 'value' in col_lower:
-                    col_mapping['value'] = col
-            
-            # Check if we found the columns
-            if 'setting' not in col_mapping or 'value' not in col_mapping:
-                logger.error(f"Could not find required columns. Available columns: {df.columns.tolist()}")
-                logger.error(f"First few rows:\n{df.head()}")
-                raise ValueError("Missing required columns in Google Sheet")
-            
-            setting_col = col_mapping['setting']
-            value_col = col_mapping['value']
-            
-            logger.info(f"Using columns: Setting='{setting_col}', Value='{value_col}'")
+            logger.info(f"Loaded {len(df)} rows from Google Sheets")
             
             self.config = {
                 'settings': {},
@@ -200,40 +179,59 @@ class Arbiclod1:
             }
             
             current_section = None
-            for _, row in df.iterrows():
-                if pd.isna(row[setting_col]):
-                    continue
-                    
-                setting = str(row[setting_col]).strip()
+            
+            # Start from row 4 (index 3) - skip title and header rows
+            for idx in range(3, len(df)):
+                row = df.iloc[idx]
                 
-                # Detect sections (support both English and Hebrew)
-                if '🤖' in setting or 'BOT CONFIGURATION' in setting or 'הגדרות בוט' in setting:
-                    current_section = 'settings'
+                # Column A (index 0) = Setting name
+                if pd.isna(row[0]):
                     continue
-                elif '⚙️' in setting or 'SCANNING' in setting or 'הגדרות סריקה' in setting:
+                
+                setting = str(row[0]).strip()
+                
+                # Column B (index 1) = Value
+                value = row[1] if not pd.isna(row[1]) else ""
+                
+                # Detect sections
+                if '🤖' in setting or 'הגדרות בוט' in setting:
                     current_section = 'settings'
+                    logger.info("📍 Found settings section")
                     continue
-                elif '🏦' in setting or 'EXCHANGES' in setting or 'בורסות למעקב' in setting:
+                elif '⚙️' in setting or 'הגדרות סריקה' in setting:
+                    current_section = 'settings'
+                    logger.info("📍 Found scanning settings section")
+                    continue
+                elif '🏦' in setting or 'בורסות למעקב' in setting:
                     current_section = 'exchanges'
+                    logger.info("📍 Found exchanges section")
                     continue
-                elif '💰' in setting or 'SYMBOLS' in setting or 'מטבעות למעקב' in setting:
+                elif '💰' in setting or 'מטבעות למעקב' in setting:
                     current_section = 'symbols'
+                    logger.info("📍 Found symbols section")
                     continue
-                elif '📖' in setting or 'HOW TO USE' in setting or 'הוראות שימוש' in setting:
+                elif '📖' in setting or 'הוראות שימוש' in setting:
+                    logger.info("📍 Reached instructions - stopping")
                     break
                 
-                # Parse values
+                # Skip if no section yet
+                if current_section is None:
+                    continue
+                
+                # Parse values based on section
                 if current_section == 'settings':
-                    value = row[value_col]
                     self.config['settings'][setting] = value
+                    logger.info(f"  Setting: {setting} = {value}")
                 elif current_section == 'exchanges':
-                    enabled = str(row[value_col]).strip().upper() == 'V'
+                    enabled = str(value).strip().upper() == 'V'
                     if enabled:
                         self.config['exchanges'][setting] = True
+                        logger.info(f"  Exchange enabled: {setting}")
                 elif current_section == 'symbols':
-                    enabled = str(row[value_col]).strip().upper() == 'V'
+                    enabled = str(value).strip().upper() == 'V'
                     if enabled:
                         self.config['symbols'][setting] = True
+                        logger.info(f"  Symbol enabled: {setting}")
                         
         except Exception as e:
             logger.error(f"Failed to load from Google Sheets: {e}")
