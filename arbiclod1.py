@@ -6,7 +6,7 @@ import asyncio
 import random
 import hashlib
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import logging
 from threading import Thread
@@ -21,12 +21,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app for keep-alive
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Arbiclod-1 is running! 🚀"
+    return "Arbiclod-1 is running!"
 
 @app.route('/ping')
 def ping():
@@ -55,7 +54,6 @@ class Arbiclod1:
         self.total_scans = 0
         self.start_time = datetime.now()
 
-        # Telegram defaults
         self.telegram_token = ''
         self.telegram_chat_id = ''
         self.group_mode = False
@@ -65,7 +63,7 @@ class Arbiclod1:
         self.min_profit = 1.0
 
         logger.info("=" * 60)
-        logger.info("🤖 ARBICLOD-1 - STARTING UP")
+        logger.info("ARBICLOD-1 - STARTING UP")
         logger.info("=" * 60)
 
         self.load_config()
@@ -79,7 +77,7 @@ class Arbiclod1:
     def load_config_from_google_sheets(self):
         import pandas as pd
 
-        logger.info("📊 Loading config from Google Sheets...")
+        logger.info("Loading config from Google Sheets...")
 
         if '/d/' in self.sheet_url:
             sheet_id = self.sheet_url.split('/d/')[1].split('/')[0]
@@ -107,27 +105,26 @@ class Arbiclod1:
                     continue
 
                 setting = str(row[0]).strip()
-                value = str(row[1]).strip() if not pd.isna(row[1]) else ""
+                value = str(row[1]).strip() if len(row) > 1 and not pd.isna(row[1]) else ""
 
-                # Detect sections
-                if '🤖' in setting or 'הגדרות בוט' in setting:
+                if 'הגדרות בוט' in setting or 'BOT' in setting.upper():
                     current_section = 'settings'
-                    logger.info("📍 Found settings section")
+                    logger.info("Found settings section")
                     continue
-                elif '⚙️' in setting or 'הגדרות סריקה' in setting:
+                elif 'הגדרות סריקה' in setting or 'SCAN' in setting.upper():
                     current_section = 'settings'
-                    logger.info("📍 Found scanning settings section")
+                    logger.info("Found scanning settings section")
                     continue
-                elif '🏦' in setting or 'בורסות למעקב' in setting:
+                elif 'בורסות' in setting or 'EXCHANGE' in setting.upper():
                     current_section = 'exchanges'
-                    logger.info("📍 Found exchanges section")
+                    logger.info("Found exchanges section")
                     continue
-                elif '💰' in setting or 'מטבעות למעקב' in setting:
+                elif 'מטבעות' in setting or 'SYMBOL' in setting.upper() or 'COIN' in setting.upper():
                     current_section = 'symbols'
-                    logger.info("📍 Found symbols section")
+                    logger.info("Found symbols section")
                     continue
-                elif '📖' in setting or 'הוראות שימוש' in setting:
-                    logger.info("📍 Reached instructions - stopping")
+                elif 'הוראות' in setting or 'INSTRUCTION' in setting.upper():
+                    logger.info("Reached instructions - stopping")
                     break
 
                 if current_section is None:
@@ -159,90 +156,113 @@ class Arbiclod1:
 
             settings = self.config['settings']
 
-            def get_setting(key_en, key_he, default=''):
-                if key_he in settings:
-                    return str(settings[key_he]).strip()
-                elif key_en in settings:
-                    return str(settings[key_en]).strip()
+            def get_setting(key_he, default=''):
+                for k, v in settings.items():
+                    if key_he in k:
+                        return str(v).strip()
                 return default
 
-            # CRITICAL FIX: Force string conversion and clean values
-            self.telegram_token = get_setting('telegram_token', 'טוקן_טלגרם', '')
-
-            # Fix chat ID - remove .0 if present
-            chat_id_raw = get_setting('telegram_chat_id', 'מזהה_צאט', '')
+            self.telegram_token = get_setting('טוקן_טלגרם', '')
+            
+            chat_id_raw = get_setting('מזהה_צאט', '')
             if '.' in chat_id_raw:
                 chat_id_raw = chat_id_raw.split('.')[0]
             self.telegram_chat_id = chat_id_raw
 
-            self.group_mode = get_setting('telegram_group_mode', 'מצב_קבוצה', 'X').upper() == 'V'
-            self.heartbeat_interval = int(float(get_setting('heartbeat_interval_minutes', 'דקות_בין_הודעות_חיים', '30')))
-            self.notify_changes = get_setting('notify_on_config_change', 'התרעה_על_שינ��יים', 'V').upper() == 'V'
-            self.scan_interval = int(float(get_setting('scan_interval_seconds', 'שניות_בין_סריקות', '10')))
-            self.min_profit = float(get_setting('min_profit_percent', 'אחוז_רווח_מינימלי', '1.0'))
+            self.group_mode = get_setting('מצב_קבוצה', 'X').upper() == 'V'
+            
+            try:
+                self.heartbeat_interval = int(float(get_setting('��קות_בין_הודעות_חיים', '30')))
+            except:
+                self.heartbeat_interval = 30
+                
+            self.notify_changes = get_setting('התרעה_על_שינויים', 'V').upper() == 'V'
+            
+            try:
+                self.scan_interval = int(float(get_setting('שניות_בין_סריקות', '10')))
+            except:
+                self.scan_interval = 10
+                
+            try:
+                self.min_profit = float(get_setting('אחוז_רווח_מינימלי', '1.0'))
+            except:
+                self.min_profit = 1.0
 
-            logger.info("\n" + "=" * 60)
-            logger.info("✅ Configuration loaded successfully!")
-            logger.info(f"   🔑 Token: {self.telegram_token[:20]}...")
-            logger.info(f"   💬 Chat ID: {self.telegram_chat_id}")
-            logger.info(f"   📊 Monitoring: {len(self.config['symbols'])} symbols")
-            logger.info(f"   🏦 Exchanges: {len(self.config['exchanges'])}")
-            logger.info(f"   💰 Min profit: {self.min_profit}%")
-            logger.info(f"   ⏱️  Scan interval: {self.scan_interval}s")
-            logger.info(f"   💬 Chat mode: {'Group' if self.group_mode else 'Personal'}")
-            logger.info(f"   💓 Heartbeat: {self.heartbeat_interval}min")
-            logger.info("=" * 60 + "\n")
+            logger.info("=" * 60)
+            logger.info("Configuration loaded successfully!")
+            logger.info(f"   Token: {self.telegram_token[:20]}..." if len(self.telegram_token) > 20 else f"   Token: {self.telegram_token}")
+            logger.info(f"   Chat ID: {self.telegram_chat_id}")
+            logger.info(f"   Symbols: {len(self.config['symbols'])}")
+            logger.info(f"   Exchanges: {len(self.config['exchanges'])}")
+            logger.info(f"   Min profit: {self.min_profit}%")
+            logger.info(f"   Scan interval: {self.scan_interval}s")
+            logger.info(f"   Group mode: {self.group_mode}")
+            logger.info(f"   Heartbeat: {self.heartbeat_interval}min")
+            logger.info("=" * 60)
 
         except Exception as e:
-            logger.error(f"❌ Fatal error loading config: {str(e)}")
+            logger.error(f"Fatal error loading config: {str(e)}")
             raise
 
     def check_config_changes(self):
         try:
-            old_config = self.config.copy()
             old_hash = self.config_hash
 
             self.load_config_from_google_sheets()
             new_hash = self.calculate_config_hash()
 
             if new_hash != old_hash:
-                logger.info("⚠️  Configuration changed! Reloading...")
+                logger.info("Configuration changed! Reloading...")
                 self.config_hash = new_hash
 
                 settings = self.config['settings']
 
-                def get_setting(key_en, key_he, default=''):
-                    if key_he in settings:
-                        return str(settings[key_he]).strip()
-                    elif key_en in settings:
-                        return str(settings[key_en]).strip()
+                def get_setting(key_he, default=''):
+                    for k, v in settings.items():
+                        if key_he in k:
+                            return str(v).strip()
                     return default
 
-                self.telegram_token = get_setting('telegram_token', 'טוקן_טלגרם', '')
-                chat_id_raw = get_setting('telegram_chat_id', 'מזהה_צאט', '')
+                self.telegram_token = get_setting('טוקן_טלגרם', '')
+                
+                chat_id_raw = get_setting('מזהה_צאט', '')
                 if '.' in chat_id_raw:
                     chat_id_raw = chat_id_raw.split('.')[0]
                 self.telegram_chat_id = chat_id_raw
-                self.group_mode = get_setting('telegram_group_mode', 'מצב_קבוצה', 'X').upper() == 'V'
-                self.heartbeat_interval = int(float(get_setting('heartbeat_interval_minutes', 'דקות_בין_הודעות_חיים', '30')))
-                self.notify_changes = get_setting('notify_on_config_change', 'התרעה_על_שינויים', 'V').upper() == 'V'
-                self.scan_interval = int(float(get_setting('scan_interval_seconds', 'שניות_בין_סריקות', '10')))
-                self.min_profit = float(get_setting('min_profit_percent', 'אחוז_רווח_מינימלי', '1.0'))
+
+                self.group_mode = get_setting('מצב_קבוצה', 'X').upper() == 'V'
+                
+                try:
+                    self.heartbeat_interval = int(float(get_setting('דקות_בין_הודעות_חיים', '30')))
+                except:
+                    self.heartbeat_interval = 30
+                    
+                self.notify_changes = get_setting('התרעה_על_שינויים', 'V').upper() == 'V'
+                
+                try:
+                    self.scan_interval = int(float(get_setting('שניות_בין_סריקות', '10')))
+                except:
+                    self.scan_interval = 10
+                    
+                try:
+                    self.min_profit = float(get_setting('אחוז_רווח_מינימלי', '1.0'))
+                except:
+                    self.min_profit = 1.0
 
                 if self.notify_changes:
                     message = (
-                        "⚙️ <b>CONFIG CHANGED</b>\n\n"
-                        f"📊 Symbols: {len(self.config['symbols'])}\n"
-                        f"🏦 Exchanges: {len(self.config['exchanges'])}\n"
-                        f"💰 Min profit: {self.min_profit}%\n"
-                        f"⏱️ Scan interval: {self.scan_interval}s\n"
-                        f"💬 Chat ID: {self.telegram_chat_id}\n\n"
-                        "✅ Settings reloaded successfully!\n\n"
-                        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        "CONFIG CHANGED\n\n"
+                        f"Symbols: {len(self.config['symbols'])}\n"
+                        f"Exchanges: {len(self.config['exchanges'])}\n"
+                        f"Min profit: {self.min_profit}%\n"
+                        f"Scan interval: {self.scan_interval}s\n"
+                        f"Chat ID: {self.telegram_chat_id}\n\n"
+                        "Settings reloaded!\n\n"
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                     )
                     self.send_telegram(message)
 
-                logger.info("✅ Config reloaded!")
+                logger.info("Config reloaded!")
                 return True
 
         except Exception as e:
@@ -252,50 +272,50 @@ class Arbiclod1:
 
     def send_telegram(self, message):
         if not self.telegram_token or not self.telegram_chat_id:
-            logger.warning("⚠️ Telegram not configured - token or chat_id missing")
+            logger.warning("Telegram not configured - token or chat_id missing")
+            logger.warning(f"Token: '{self.telegram_token[:10]}...' Chat ID: '{self.telegram_chat_id}'")
             return False
 
         try:
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             data = {
                 'chat_id': self.telegram_chat_id,
-                'text': message,
-                'parse_mode': 'HTML'
+                'text': message
             }
 
-            logger.info(f"📤 Sending Telegram message to chat_id: {self.telegram_chat_id}")
+            logger.info(f"Sending Telegram message to chat_id: {self.telegram_chat_id}")
             response = requests.post(url, data=data, timeout=10)
 
             if response.status_code == 200:
-                logger.info("✅ Telegram message sent successfully!")
+                logger.info("Telegram message sent successfully!")
                 return True
             else:
-                logger.error(f"❌ Telegram error {response.status_code}: {response.text}")
+                logger.error(f"Telegram error {response.status_code}: {response.text}")
                 return False
 
         except Exception as e:
-            logger.error(f"❌ Telegram send error: {str(e)}")
+            logger.error(f"Telegram send error: {str(e)}")
             return False
 
     def send_startup_message(self):
         mode = "GROUP" if self.group_mode else "PERSONAL"
         message = (
-            "🚀 <b>ARBICLOD-1 STARTED</b>\n\n"
-            f"✅ Bot is now <b>ONLINE</b>\n"
-            f"📊 Monitoring {len(self.config['symbols'])} symbols\n"
-            f"🏦 Checking {len(self.config['exchanges'])} exchanges\n"
-            f"💰 Min profit threshold: {self.min_profit}%\n"
-            f"⏱️ Scan interval: {self.scan_interval} seconds\n"
-            f"💬 Mode: {mode}\n"
-            f"💓 Heartbeat: Every {self.heartbeat_interval} minutes\n\n"
-            "Ready to find arbitrage opportunities! 🎯\n\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            "ARBICLOD-1 STARTED\n\n"
+            f"Bot is now ONLINE\n"
+            f"Monitoring {len(self.config['symbols'])} symbols\n"
+            f"Checking {len(self.config['exchanges'])} exchanges\n"
+            f"Min profit: {self.min_profit}%\n"
+            f"Scan interval: {self.scan_interval}s\n"
+            f"Mode: {mode}\n"
+            f"Heartbeat: Every {self.heartbeat_interval}min\n\n"
+            "Ready to find opportunities!\n\n"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         result = self.send_telegram(message)
         if result:
-            logger.info("🚀 Startup message sent to Telegram!")
+            logger.info("Startup message sent to Telegram!")
         else:
-            logger.error("❌ Failed to send startup message!")
+            logger.error("Failed to send startup message!")
 
     def send_heartbeat(self):
         if self.heartbeat_interval <= 0:
@@ -308,18 +328,16 @@ class Arbiclod1:
             minutes = (int(uptime.total_seconds()) % 3600) // 60
 
             message = (
-                "💓 <b>HEARTBEAT</b>\n\n"
-                f"✅ Bot is <b>ALIVE</b> and running\n\n"
-                f"📊 Stats:\n"
-                f"• Uptime: {hours}h {minutes}m\n"
-                f"• Total scans: {self.total_scans}\n"
-                f"• Opportunities: {self.opportunities_found}\n"
-                f"• Last scan: Just now\n\n"
-                f"🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}"
+                "HEARTBEAT\n\n"
+                f"Bot is ALIVE\n\n"
+                f"Uptime: {hours}h {minutes}m\n"
+                f"Total scans: {self.total_scans}\n"
+                f"Opportunities: {self.opportunities_found}\n\n"
+                f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             self.send_telegram(message)
             self.last_heartbeat = now
-            logger.info("💓 Heartbeat sent")
+            logger.info("Heartbeat sent")
 
     def get_simulated_price(self, base_price):
         variation = random.uniform(-0.02, 0.02)
@@ -381,22 +399,22 @@ class Arbiclod1:
 
     def format_opportunity(self, opp):
         return (
-            "🚨 <b>ARBITRAGE OPPORTUNITY</b> 🚨\n\n"
-            f"💰 <b>{opp['symbol']}</b>\n\n"
-            f"📉 BUY: <b>{opp['buy_exchange'].upper()}</b>\n"
-            f"   Price: ${opp['buy_price']:.4f}\n"
-            f"   Volume: ${opp['buy_volume']:,.0f}\n\n"
-            f"📈 SELL: <b>{opp['sell_exchange'].upper()}</b>\n"
-            f"   Price: ${opp['sell_price']:.4f}\n"
-            f"   Volume: ${opp['sell_volume']:,.0f}\n\n"
-            f"💵 <b>PROFIT: {opp['profit']:.2f}%</b>\n\n"
-            "⚠️ Check fees before trading!\n\n"
-            f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            "ARBITRAGE OPPORTUNITY\n\n"
+            f"Symbol: {opp['symbol']}\n\n"
+            f"BUY: {opp['buy_exchange'].upper()}\n"
+            f"Price: ${opp['buy_price']:.4f}\n"
+            f"Volume: ${opp['buy_volume']:,.0f}\n\n"
+            f"SELL: {opp['sell_exchange'].upper()}\n"
+            f"Price: ${opp['sell_price']:.4f}\n"
+            f"Volume: ${opp['sell_volume']:,.0f}\n\n"
+            f"PROFIT: {opp['profit']:.2f}%\n\n"
+            "Check fees before trading!\n\n"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
     async def monitor_loop(self):
-        logger.info("🤖 Bot started - monitoring markets")
-        logger.info(f"⏱️ Checking every {self.scan_interval} seconds")
+        logger.info("Bot started - monitoring markets")
+        logger.info(f"Checking every {self.scan_interval} seconds")
 
         config_check_counter = 0
 
@@ -404,7 +422,7 @@ class Arbiclod1:
             try:
                 self.total_scans += 1
                 timestamp = datetime.now().strftime('%H:%M:%S')
-                logger.info(f"[{timestamp}] 🔍 Scan #{self.total_scans}")
+                logger.info(f"[{timestamp}] Scan #{self.total_scans}")
 
                 config_check_counter += 1
                 if config_check_counter >= 5:
@@ -421,7 +439,7 @@ class Arbiclod1:
 
                 if opportunities:
                     self.opportunities_found += len(opportunities)
-                    logger.info(f"🎯 Found {len(opportunities)} opportunity(ies)!")
+                    logger.info(f"Found {len(opportunities)} opportunity(ies)!")
 
                     for opp in opportunities:
                         message = self.format_opportunity(opp)
@@ -432,34 +450,33 @@ class Arbiclod1:
                 await asyncio.sleep(self.scan_interval)
 
             except KeyboardInterrupt:
-                logger.info("\n⛔ Bot stopped by user")
-                self.send_telegram("⛔ <b>ARBICLOD-1 STOPPED</b>\n\nBot has been shut down.")
+                logger.info("Bot stopped by user")
+                self.send_telegram("ARBICLOD-1 STOPPED\n\nBot has been shut down.")
                 break
             except Exception as e:
-                logger.error(f"❌ Error in main loop: {str(e)}")
+                logger.error(f"Error in main loop: {str(e)}")
                 await asyncio.sleep(10)
 
     def run(self):
-        logger.info("🌐 Starting Flask web server...")
+        logger.info("Starting Flask web server...")
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
 
         try:
             asyncio.run(self.monitor_loop())
         except KeyboardInterrupt:
-            logger.info("\n👋 Goodbye!")
+            logger.info("Goodbye!")
 
 
 if __name__ == "__main__":
-    # Always use Google Sheets
     sheet_url = os.environ.get('GOOGLE_SHEET_URL', '')
 
     if not sheet_url:
-        print("❌ GOOGLE_SHEET_URL environment variable not set!")
+        print("ERROR: GOOGLE_SHEET_URL environment variable not set!")
         print("Set it in Render.com Environment Variables")
         import sys
         sys.exit(1)
 
-    logger.info(f"📋 Using Google Sheet URL: {sheet_url[:50]}...")
+    logger.info(f"Using Google Sheet URL: {sheet_url[:50]}...")
     bot = Arbiclod1(sheet_url=sheet_url)
     bot.run()
