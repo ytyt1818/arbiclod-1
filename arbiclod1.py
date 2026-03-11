@@ -32,7 +32,6 @@ def run_flask():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
 
-# עמלות לכל בורסה (באחוזים)
 EXCHANGE_FEES = {
     'binance': {'taker': 0.1, 'withdrawal_btc': 0.0005},
     'kucoin': {'taker': 0.1, 'withdrawal_btc': 0.0005},
@@ -188,10 +187,10 @@ class Arbiclod1:
             
             msg = (
                 "⚙️ *עדכון הגדרות*\n\n"
-                "🔄 זוהו שינויים בהגדרות:\n\n"
+                "🔄 זוהו שינויים:\n\n"
                 + "\n".join([f"• {c}" for c in changes]) +
-                f"\n\n📊 בורסות פעילות: {len(self.exchanges_config)}\n"
-                f"💰 מטבעות פעילים: {len(self.symbols)}\n\n"
+                f"\n\n📊 בורסות: {len(self.exchanges_config)}\n"
+                f"💰 מטבעות: {len(self.symbols)}\n\n"
                 f"🕐 {datetime.now().strftime('%H:%M:%S')}"
             )
             self.send_telegram(msg)
@@ -284,7 +283,8 @@ class Arbiclod1:
             'sell_fee': sell_fee * 100,
             'withdrawal_cost': withdrawal_cost
         }
-            async def check_arbitrage(self, symbol):
+
+    async def check_arbitrage(self, symbol):
         prices = await self.get_prices(symbol)
         
         if len(prices) < 2:
@@ -334,26 +334,22 @@ class Arbiclod1:
             "🚨 *הזדמנות ארביטראז'!*\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💰 *מטבע:* {opp['symbol']}\n\n"
-            
             f"📥 *קנייה:*\n"
             f"   🏦 בורסה: *{opp['buy_exchange'].upper()}*\n"
             f"   💵 מחיר: ${opp['buy_price']:,.4f}\n"
             f"   📊 כמות זמינה: {opp['buy_volume']:.4f} {symbol_name}\n"
             f"   💸 עמלה: {opp['buy_fee']:.2f}%\n\n"
-            
             f"📤 *מכירה:*\n"
             f"   🏦 בורסה: *{opp['sell_exchange'].upper()}*\n"
             f"   💵 מחיר: ${opp['sell_price']:,.4f}\n"
             f"   📊 כמות זמינה: {opp['sell_volume']:.4f} {symbol_name}\n"
             f"   💸 עמלה: {opp['sell_fee']:.2f}%\n\n"
-            
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 *רווח לפני עלויות:* {opp['gross_percent']:.2f}%\n"
             f"✅ *רווח אחרי עלויות:* {opp['net_percent']:.2f}%\n"
             f"💎 *כמות מומלצת:* {opp['amount']:.4f} {symbol_name}\n"
             f"💰 *רווח נקי:* ${opp['net_profit']:.2f}\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
             f"🕐 {datetime.now().strftime('%H:%M:%S')}"
         )
         return msg
