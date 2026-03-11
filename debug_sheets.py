@@ -1,14 +1,17 @@
 import pandas as pd
-import sys
 
-sheet_url = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+sheet_url = "https://docs.google.com/spreadsheets/d/1O_a9_tEuubCuBqsX_dOqsKJlYhJEDGBbUZUF1Q9xoQU/edit?gid=1278180562#gid=1278180562"
 
-if '/d/' in sheet_url:
-    sheet_id = sheet_url.split('/d/')[1].split('/')[0]
+sheet_id = sheet_url.split('/d/')[1].split('/')[0]
 
 url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
 
+print(f"קורא מ: {url}")
+
 df = pd.read_csv(url, header=None)
+
+print(f"נטען! שורות: {len(df)}")
+print("="*50)
 
 for idx in range(len(df)):
     row = df.iloc[idx]
