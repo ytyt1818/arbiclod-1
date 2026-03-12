@@ -432,59 +432,54 @@ Ready to find arbitrage opportunities! 🎯
             logger.info("💓 Heartbeat sent")
     
     async def check_arbitrage(self, symbol):
-        """Check for arbitrage opportunity using REAL prices"""
+        """Check for REAL arbitrage opportunity using exchange APIs"""
         import ccxt.async_support as ccxt
         
         prices = []
         
         # Fetch real prices from each exchange
         for exchange_name in self.config['exchanges'].keys():
+            exchange = None
             try:
                 # Initialize exchange
-                if exchange_name == 'binance':
-                    exchange = ccxt.binance()
-                elif exchange_name == 'kucoin':
-                    exchange = ccxt.kucoin()
-                elif exchange_name == 'bybit':
-                    exchange = ccxt.bybit()
-                elif exchange_name == 'coinbase':
-                    exchange = ccxt.coinbase()
-                elif exchange_name == 'kraken':
-                    exchange = ccxt.kraken()
-                elif exchange_name == 'gate':
-                    exchange = ccxt.gate()
-                elif exchange_name == 'mexc':
-                    exchange = ccxt.mexc()
-                elif exchange_name == 'okx':
-                    exchange = ccxt.okx()
-                else:
+                exchange_class = getattr(ccxt, exchange_name, None)
+                if not exchange_class:
                     continue
+                    
+                exchange = exchange_class({'enableRateLimit': True})
                 
-                # Fetch ticker
-                ticker = await exchange.fetch_ticker(symbol)
-                await exchange.close()
+                # Fetch ticker with timeout
+                ticker = await asyncio.wait_for(
+                    exchange.fetch_ticker(symbol),
+                    timeout=3.0  # 3 second timeout per exchange
+                )
                 
                 # Get prices and volume
-                ask = ticker['ask']  # Buy price
-                bid = ticker['bid']  # Sell price
-                volume_24h = ticker['quoteVolume'] if ticker['quoteVolume'] else 0
+                if ticker['ask'] and ticker['bid'] and ticker['quoteVolume']:
+                    prices.append({
+                        'exchange': exchange_name,
+                        'ask': float(ticker['ask']),
+                        'bid': float(ticker['bid']),
+                        'volume': float(ticker['quoteVolume'])
+                    })
                 
-                prices.append({
-                    'exchange': exchange_name,
-                    'ask': ask,
-                    'bid': bid,
-                    'volume': volume_24h
-                })
-                
+            except asyncio.TimeoutError:
+                logger.debug(f"⏱️ Timeout fetching {symbol} from {exchange_name}")
             except Exception as e:
-                logger.warning(f"Could not fetch {symbol} from {exchange_name}: {e}")
-                continue
+                logger.debug(f"⚠️ Could not fetch {symbol} from {exchange_name}: {str(e)[:50]}")
+            finally:
+                # Always close connection
+                if exchange:
+                    try:
+                        await exchange.close()
+                    except:
+                        pass
         
         # Need at least 2 exchanges to compare
         if len(prices) < 2:
             return None
         
-        # Find best buy and sell opportunities
+        # Find best buy and sell
         best_buy = min(prices, key=lambda x: x['ask'])
         best_sell = max(prices, key=lambda x: x['bid'])
         
@@ -496,7 +491,7 @@ Ready to find arbitrage opportunities! 🎯
         sell_price = best_sell['bid']
         profit = ((sell_price - buy_price) / buy_price) * 100
         
-        # Check if profit meets threshold
+        # Only return if profit meets threshold
         if profit >= self.min_profit:
             return {
                 'symbol': symbol,
@@ -628,12 +623,25 @@ Ready to find arbitrage opportunities! 🎯
                 
                 if opportunities:
                     self.opportunities_found += len(opportunities)
-                    logger.info(f"🎯 נמצאו {len(opportunities)} הזדמנות!")
                     
-                    for opp in opportunities:
+                    # Sort by profit (best first)
+                    opportunities.sort(key=lambda x: x['profit'], reverse=True)
+                    
+                    # Take only top 5
+                    top_opportunities = opportunities[:5]
+                    
+                    logger.info(f"🎯 נמצאו {len(opportunities)} הזדמנויות! שולח את {len(top_opportunities)} הטובות ביותר")
+                    
+                    # Send each top opportunity
+                    for i, opp in enumerate(top_opportunities, 1):
                         message = self.format_opportunity(opp)
-                        print("\n" + message + "\n")
-                        self.send_telegram(message)
+                        # Add ranking header
+                        rank_header = f"🏆 <b>מקום #{i} מתוך {len(opportunities)} הזדמנויות</b>\n\n"
+                        self.send_telegram(rank_header + message)
+                        
+                        # Small delay to avoid rate limiting
+                        if i < len(top_opportunities):
+                            await asyncio.sleep(0.5)
                 else:
                     logger.info("   אין הזדמנויות")
                 
