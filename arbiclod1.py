@@ -9,6 +9,14 @@ import sys
 from datetime import datetime
 from threading import Thread
 
+# ✅ תיקון שעון ישראל
+os.environ['TZ'] = 'Asia/Jerusalem'
+try:
+    import time
+    time.tzset()
+except AttributeError:
+    pass  # Windows לא תומך ב-tzset
+
 import requests
 from flask import Flask
 
@@ -208,7 +216,6 @@ class Arbiclod1:
 
         logger.info("📊 Loading from Google Sheets...")
 
-        # חלץ sheet ID מה-URL
         if self.sheet_url and '/d/' in self.sheet_url:
             sheet_id = self.sheet_url.split('/d/')[1].split('/')[0]
         else:
@@ -238,10 +245,9 @@ class Arbiclod1:
             col_a = str(row[0]).strip()
             col_b = str(row[1]).strip() if not pd.isna(row[1]) else ""
 
-            # ✅ שורה 0 מיוחדת - Google Sheets מאחד את הכותרות
+            # שורה 0 מיוחדת
             if idx == 0:
                 current_section = 'settings'
-                # חלץ token מהשורה הראשונה אם קיים
                 if col_b and 'ערך' in col_b:
                     token_val = col_b.replace('ערך', '').strip()
                     if token_val:
@@ -266,11 +272,9 @@ class Arbiclod1:
                 logger.info("📍 Stop - instructions")
                 break
 
-            # דלג על שורות ריקות או כותרות
             if not col_a or col_a == 'ריק':
                 continue
 
-            # שמור ערכים
             if current_section == 'settings':
                 self.config['settings'][col_a] = col_b
                 logger.info(f"  Setting: {col_a} = {col_b}")
@@ -354,15 +358,27 @@ class Arbiclod1:
             def get(key1, key2='', default=''):
                 return s.get(key1, s.get(key2, default))
 
-            # ✅ תמיכה בשמות token ו-chatid
             self.telegram_token = get('token', 'טוקן_טלגרם', '')
             self.telegram_chat_id = get('chatid', 'מזהה_צאט', '')
-            self.group_mode = str(get('מצב_קבוצה', 'group_mode', 'X')).upper() == 'V'
-            self.heartbeat_interval = int(float(get('דקות_בין_הודעות_חיים', 'heartbeat_minutes', 10)))
-            self.notify_changes = str(get('התרעה_על_שינויים', 'notify_changes', 'V')).upper() == 'V'
-            self.scan_interval = int(float(get('שניות_בין_סריקות', 'scan_seconds', 10)))
-            self.min_profit = float(get('אחוז_רווח_מינימלי', 'min_profit', 0.5))
-            self.min_volume_usd = float(get('מחזור_מינימלי_דולר', 'min_volume', 100000))
+            self.group_mode = (
+                str(get('מצב_קבוצה', 'group_mode', 'X')).upper() == 'V'
+            )
+            self.heartbeat_interval = int(float(
+                get('דקות_בין_הודעות_חיים', 'heartbeat_minutes', 10)
+            ))
+            self.notify_changes = (
+                str(get('התרעה_על_שינויים', 'notify_changes', 'V'))
+                .upper() == 'V'
+            )
+            self.scan_interval = int(float(
+                get('שניות_בין_סריקות', 'scan_seconds', 10)
+            ))
+            self.min_profit = float(
+                get('אחוז_רווח_מינימלי', 'min_profit', 0.5)
+            )
+            self.min_volume_usd = float(
+                get('מחזור_מינימלי_דולר', 'min_volume', 100000)
+            )
 
             logger.info(
                 f"\n{'=' * 50}\n"
@@ -394,6 +410,11 @@ class Arbiclod1:
                 logger.info("⚙️  Config changed!")
                 self.config_hash = new_hash
                 self.load_config()
+
+                # ✅ עדכן את ה-pool אם הבורסות השתנו
+                if self.exchange_pool:
+                    asyncio.create_task(self.reinitialize_pool())
+
                 if self.notify_changes:
                     self.send_telegram(
                         f"⚙️ <b>הגדרות עודכנו!</b>\n\n"
@@ -407,6 +428,18 @@ class Arbiclod1:
         except Exception as e:
             logger.error(f"Config check error: {e}")
         return False
+
+    async def reinitialize_pool(self):
+        """עדכן בורסות אם השתנו"""
+        try:
+            await self.exchange_pool.close_all()
+            self.exchange_pool = ExchangePool(
+                list(self.config['exchanges'].keys())
+            )
+            await self.exchange_pool.initialize()
+            logger.info("✅ Exchange pool reinitialized")
+        except Exception as e:
+            logger.error(f"Pool reinit error: {e}")
 
     def send_telegram(self, message):
         if not self.telegram_token:
@@ -423,7 +456,9 @@ class Arbiclod1:
             if resp.status_code == 200:
                 return True
             else:
-                logger.warning(f"Telegram error {resp.status_code}: {resp.text}")
+                logger.warning(
+                    f"Telegram error {resp.status_code}: {resp.text}"
+                )
                 return False
         except Exception as e:
             logger.warning(f"Telegram send error: {e}")
@@ -543,7 +578,6 @@ class Arbiclod1:
         if len(prices) < 2:
             return None
 
-        # סנן לפי מחזור מינימלי
         prices = [p for p in prices if p['volume'] >= self.min_volume_usd]
         if len(prices) < 2:
             return None
