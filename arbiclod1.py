@@ -9,13 +9,13 @@ import sys
 from datetime import datetime
 from threading import Thread
 
-# ✅ תיקון שעון ישראל
+# ✅ שעון ישראל
 os.environ['TZ'] = 'Asia/Jerusalem'
 try:
     import time
     time.tzset()
 except AttributeError:
-    pass  # Windows לא תומך ב-tzset
+    pass
 
 import requests
 from flask import Flask
@@ -411,10 +411,6 @@ class Arbiclod1:
                 self.config_hash = new_hash
                 self.load_config()
 
-                # ✅ עדכן את ה-pool אם הבורסות השתנו
-                if self.exchange_pool:
-                    asyncio.create_task(self.reinitialize_pool())
-
                 if self.notify_changes:
                     self.send_telegram(
                         f"⚙️ <b>הגדרות עודכנו!</b>\n\n"
@@ -428,18 +424,6 @@ class Arbiclod1:
         except Exception as e:
             logger.error(f"Config check error: {e}")
         return False
-
-    async def reinitialize_pool(self):
-        """עדכן בורסות אם השתנו"""
-        try:
-            await self.exchange_pool.close_all()
-            self.exchange_pool = ExchangePool(
-                list(self.config['exchanges'].keys())
-            )
-            await self.exchange_pool.initialize()
-            logger.info("✅ Exchange pool reinitialized")
-        except Exception as e:
-            logger.error(f"Pool reinit error: {e}")
 
     def send_telegram(self, message):
         if not self.telegram_token:
@@ -491,7 +475,7 @@ class Arbiclod1:
         else:
             logger.warning("⚠️  Could not send startup message")
 
-    def send_heartbeat(self):
+    def send_heartbeat(self, top_opportunities=None):
         if self.heartbeat_interval <= 0:
             return
 
@@ -512,6 +496,19 @@ class Arbiclod1:
                 self.exchange_pool.exchanges.keys()
             ).upper() if self.exchange_pool else ""
 
+            # ✅ הוסף top 5 הזדמנויות להודעת דופק
+            top_text = ""
+            if top_opportunities:
+                top_text = "\n\n🏆 <b>5 ההזדמנויות הטובות ביותר:</b>\n"
+                for i, opp in enumerate(top_opportunities[:5], 1):
+                    top_text += (
+                        f"   {i}. {opp['symbol']}: "
+                        f"{opp['net_pct']:.3f}% נטו "
+                        f"(${opp['net_usd']:,.0f}) "
+                        f"{opp['buy_exchange'].upper()}→"
+                        f"{opp['sell_exchange'].upper()}\n"
+                    )
+
             msg = (
                 f"💓 <b>הבוט חי!</b>\n\n"
                 f"✅ פעיל ורץ\n\n"
@@ -519,8 +516,10 @@ class Arbiclod1:
                 f"   ⏱️ זמן פעילות: {h}h {m}m\n"
                 f"   🔍 סריקות: {self.total_scans:,}\n"
                 f"   🎯 הזדמנויות: {self.opportunities_found:,}\n"
-                f"   ⚡ סריקה כל: {self.scan_interval}s\n\n"
-                f"🏦 בורסות: {exchanges}\n\n"
+                f"   ⚡ סריקה כל: {self.scan_interval}s\n"
+                f"   💰 רווח מינימלי: {self.min_profit}%\n\n"
+                f"🏦 בורסות: {exchanges}"
+                f"{top_text}\n\n"
                 f"🕐 {now.strftime('%d/%m/%Y %H:%M:%S')}"
             )
             self.send_telegram(msg)
@@ -610,10 +609,6 @@ class Arbiclod1:
         net_pct = (net_usd / trade_usd) * 100
 
         if net_pct < self.min_profit:
-            logger.debug(
-                f"📉 {symbol}: gross={gross_pct:.3f}% "
-                f"net={net_pct:.3f}% - below threshold"
-            )
             return None
 
         return {
@@ -641,10 +636,20 @@ class Arbiclod1:
 
         opportunities = []
         for r in results:
-            if isinstance(r, Exception):
-                logger.error(f"Scan error: {r}")
-            elif r is not None:
-                opportunities.append(r)
+            # ✅ תיקון הבאג - סנן כל מה שלא dict תקין
+            if r is None:
+                continue
+            if isinstance(r, (Exception, BaseException)):
+                logger.debug(f"Scan skip: {type(r).__name__}")
+                continue
+            if not isinstance(r, dict):
+                continue
+            if 'fees' not in r or 'net_pct' not in r:
+                continue
+            opportunities.append(r)
+
+        # ✅ מיין לפי רווח נטו - הכי טוב ראשון
+        opportunities.sort(key=lambda x: x['net_pct'], reverse=True)
 
         return opportunities
 
@@ -694,6 +699,7 @@ class Arbiclod1:
     async def monitor_loop(self):
         logger.info("🔍 Monitor loop started")
         config_counter = 0
+        last_opportunities = []
 
         now = datetime.now()
         wait = self.scan_interval - (now.second % self.scan_interval)
@@ -712,9 +718,11 @@ class Arbiclod1:
                     self.check_config_changes()
                     config_counter = 0
 
-                self.send_heartbeat()
+                # ✅ העבר top הזדמנויות להודעת דופק
+                self.send_heartbeat(top_opportunities=last_opportunities)
 
                 opportunities = await self.scan_all()
+                last_opportunities = opportunities
 
                 duration = (datetime.now() - t_start).total_seconds()
 
@@ -725,10 +733,16 @@ class Arbiclod1:
                         f"{len(opportunities)} opportunities! "
                         f"({duration:.1f}s)"
                     )
-                    for opp in opportunities:
+                    # ✅ שלח רק 5 הטובות ביותר
+                    for opp in opportunities[:5]:
                         msg = self.format_opportunity(opp)
                         print(f"\n{msg}\n")
                         self.send_telegram(msg)
+
+                    if len(opportunities) > 5:
+                        logger.info(
+                            f"   (showing top 5 of {len(opportunities)})"
+                        )
                 else:
                     logger.info(
                         f"[{ts}] 🔍 #{self.total_scans}: "
