@@ -1,21 +1,23 @@
 """
 Arbiclod-1 - Enhanced Crypto Arbitrage Bot
-Features:
-- Unified single-sheet configuration
-- Config change notifications
-- Heartbeat (alive) messages
-- Telegram group support
-- Google Sheets integration
-- Flask web server for Render Keep-Alive
-- Real price fetching from exchanges
 """
 import asyncio
 import hashlib
-from datetime import datetime, timedelta
-import requests
 import logging
-from pathlib import Path
+import os
+import sys
+from datetime import datetime
 from threading import Thread
+
+# ✅ תיקון שעון ישראל
+os.environ['TZ'] = 'Asia/Jerusalem'
+try:
+    import time
+    time.tzset()
+except AttributeError:
+    pass  # Windows לא תומך ב-tzset
+
+import requests
 from flask import Flask
 
 logging.basicConfig(
@@ -28,7 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app for keep-alive
 app = Flask(__name__)
 
 @app.route('/')
@@ -48,11 +49,141 @@ def status():
     }
 
 def run_flask():
-    """Run Flask in a separate thread"""
-    import os
-    # Disable Flask development mode warnings
     os.environ['FLASK_ENV'] = 'production'
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False, threaded=True)
+    app.run(host='0.0.0.0', port=8080, debug=False,
+            use_reloader=False, threaded=True)
+
+
+EXCHANGE_FEES = {
+    'binance': {
+        'taker': 0.001,
+        'withdrawal': {
+            'BTC': 0.0005, 'ETH': 0.005, 'BNB': 0.0005,
+            'SOL': 0.01, 'XRP': 0.25, 'USDT': 1.0,
+            'DEFAULT_PCT': 0.001
+        }
+    },
+    'kucoin': {
+        'taker': 0.001,
+        'withdrawal': {
+            'BTC': 0.0004, 'ETH': 0.004, 'BNB': 0.001,
+            'SOL': 0.01, 'XRP': 0.2, 'USDT': 1.0,
+            'DEFAULT_PCT': 0.001
+        }
+    },
+    'bybit': {
+        'taker': 0.001,
+        'withdrawal': {
+            'BTC': 0.0005, 'ETH': 0.005, 'BNB': 0.0008,
+            'SOL': 0.01, 'XRP': 0.25, 'USDT': 1.0,
+            'DEFAULT_PCT': 0.001
+        }
+    },
+    'okx': {
+        'taker': 0.0008,
+        'withdrawal': {
+            'BTC': 0.0004, 'ETH': 0.004, 'SOL': 0.01,
+            'XRP': 0.2, 'USDT': 1.0, 'DEFAULT_PCT': 0.001
+        }
+    },
+    'gate': {
+        'taker': 0.002,
+        'withdrawal': {
+            'BTC': 0.001, 'ETH': 0.01, 'SOL': 0.02,
+            'XRP': 0.3, 'USDT': 2.0, 'DEFAULT_PCT': 0.002
+        }
+    },
+    'mexc': {
+        'taker': 0.002,
+        'withdrawal': {
+            'BTC': 0.0005, 'ETH': 0.006, 'SOL': 0.01,
+            'XRP': 0.25, 'USDT': 1.0, 'DEFAULT_PCT': 0.001
+        }
+    },
+    'kraken': {
+        'taker': 0.0026,
+        'withdrawal': {
+            'BTC': 0.00015, 'ETH': 0.0035, 'SOL': 0.01,
+            'XRP': 0.02, 'USDT': 2.5, 'DEFAULT_PCT': 0.002
+        }
+    },
+    'coinbase': {
+        'taker': 0.006,
+        'withdrawal': {
+            'BTC': 0.0, 'ETH': 0.0, 'SOL': 0.0,
+            'DEFAULT_PCT': 0.001
+        }
+    }
+}
+
+
+def calculate_real_fees(buy_exchange, sell_exchange,
+                        coin_symbol, trade_usd, buy_price):
+    buy_cfg = EXCHANGE_FEES.get(buy_exchange, EXCHANGE_FEES['binance'])
+    sell_cfg = EXCHANGE_FEES.get(sell_exchange, EXCHANGE_FEES['binance'])
+
+    buy_fee = trade_usd * buy_cfg['taker']
+    sell_fee = trade_usd * sell_cfg['taker']
+
+    wd = buy_cfg['withdrawal']
+    if coin_symbol in wd:
+        withdrawal_fee = wd[coin_symbol] * buy_price
+    else:
+        withdrawal_fee = trade_usd * wd.get('DEFAULT_PCT', 0.001)
+
+    total = buy_fee + sell_fee + withdrawal_fee
+    return {
+        'buy_fee': buy_fee,
+        'buy_fee_pct': buy_cfg['taker'] * 100,
+        'sell_fee': sell_fee,
+        'sell_fee_pct': sell_cfg['taker'] * 100,
+        'withdrawal_fee': withdrawal_fee,
+        'total': total,
+        'total_pct': (total / trade_usd) * 100
+    }
+
+
+class ExchangePool:
+    def __init__(self, exchange_names):
+        self.exchange_names = exchange_names
+        self.exchanges = {}
+
+    async def initialize(self):
+        import ccxt.async_support as ccxt
+
+        classes = {
+            'binance': ccxt.binance,
+            'kucoin': ccxt.kucoin,
+            'bybit': ccxt.bybit,
+            'coinbase': ccxt.coinbase,
+            'kraken': ccxt.kraken,
+            'gate': ccxt.gate,
+            'mexc': ccxt.mexc,
+            'okx': ccxt.okx,
+        }
+
+        for name in self.exchange_names:
+            if name in classes:
+                try:
+                    self.exchanges[name] = classes[name]({
+                        'enableRateLimit': True,
+                        'timeout': 10000,
+                        'options': {'defaultType': 'spot'}
+                    })
+                    logger.info(f"✅ Connected: {name}")
+                except Exception as e:
+                    logger.error(f"❌ Failed {name}: {e}")
+
+        logger.info(f"🏦 Pool ready: {list(self.exchanges.keys())}")
+
+    async def close_all(self):
+        for name, ex in self.exchanges.items():
+            try:
+                await ex.close()
+            except Exception:
+                pass
+        self.exchanges.clear()
+
 
 class Arbiclod1:
     def __init__(self, use_google_sheets=False, sheet_url=None):
@@ -64,37 +195,114 @@ class Arbiclod1:
         self.opportunities_found = 0
         self.total_scans = 0
         self.start_time = datetime.now()
-        
-        logger.info("="*60)
+        self.exchange_pool = None
+
+        logger.info("=" * 60)
         logger.info("🤖 ARBICLOD-1 - STARTING UP")
-        logger.info("="*60)
-        
+        logger.info("=" * 60)
+
         self.load_config()
         self.send_startup_message()
-        
+
     def calculate_config_hash(self):
-        """Calculate hash of config to detect changes"""
         import json
-        config_str = json.dumps(self.config, sort_keys=True)
-        return hashlib.md5(config_str.encode()).hexdigest()
-    
-    def load_config_from_excel(self):
-        """Load from local Excel file"""
+        return hashlib.md5(
+            json.dumps(self.config, sort_keys=True).encode()
+        ).hexdigest()
+
+    def load_config_from_google_sheets(self):
         import pandas as pd
-        
+        import io
+
+        logger.info("📊 Loading from Google Sheets...")
+
+        if self.sheet_url and '/d/' in self.sheet_url:
+            sheet_id = self.sheet_url.split('/d/')[1].split('/')[0]
+        else:
+            sheet_id = self.sheet_url
+
+        url = (f"https://docs.google.com/spreadsheets/d/"
+               f"{sheet_id}/gviz/tq?tqx=out:csv&gid=0")
+
+        logger.info(f"URL: {url}")
+
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            raise Exception(f"Failed to load sheet: {resp.status_code}")
+
+        df = pd.read_csv(io.StringIO(resp.text), header=None)
+        logger.info(f"Loaded {len(df)} rows")
+
+        self.config = {'settings': {}, 'exchanges': {}, 'symbols': {}}
+        current_section = 'settings'
+
+        for idx in range(len(df)):
+            row = df.iloc[idx]
+
+            if pd.isna(row[0]):
+                continue
+
+            col_a = str(row[0]).strip()
+            col_b = str(row[1]).strip() if not pd.isna(row[1]) else ""
+
+            # שורה 0 מיוחדת
+            if idx == 0:
+                current_section = 'settings'
+                if col_b and 'ערך' in col_b:
+                    token_val = col_b.replace('ערך', '').strip()
+                    if token_val:
+                        self.config['settings']['token'] = token_val
+                        logger.info(f"  token = {token_val[:20]}...")
+                continue
+
+            # זיהוי סקציות
+            if '⚙️' in col_a or 'הגדרות סריקה' in col_a:
+                current_section = 'settings'
+                logger.info("📍 Section: scanning")
+                continue
+            elif '🏦' in col_a or 'בורסות למעקב' in col_a:
+                current_section = 'exchanges'
+                logger.info("📍 Section: exchanges")
+                continue
+            elif '💰' in col_a or 'מטבעות למעקב' in col_a:
+                current_section = 'symbols'
+                logger.info("📍 Section: symbols")
+                continue
+            elif '📖' in col_a or 'הוראות שימוש' in col_a:
+                logger.info("📍 Stop - instructions")
+                break
+
+            if not col_a or col_a == 'ריק':
+                continue
+
+            if current_section == 'settings':
+                self.config['settings'][col_a] = col_b
+                logger.info(f"  Setting: {col_a} = {col_b}")
+            elif current_section == 'exchanges':
+                if col_b.upper() == 'V':
+                    self.config['exchanges'][col_a] = True
+                    logger.info(f"  Exchange ON: {col_a}")
+            elif current_section == 'symbols':
+                if col_b.upper() == 'V':
+                    self.config['symbols'][col_a] = True
+                    logger.info(f"  Symbol ON: {col_a}")
+
+        logger.info(
+            f"✅ Loaded: "
+            f"{len(self.config['settings'])} settings, "
+            f"{len(self.config['exchanges'])} exchanges, "
+            f"{len(self.config['symbols'])} symbols"
+        )
+
+    def load_config_from_excel(self):
+        import pandas as pd
+        from pathlib import Path
+
         config_file = 'arbiclod1_config.xlsx'
         if not Path(config_file).exists():
-            # Fallback to old config
             config_file = 'config.xlsx'
-            if not Path(config_file).exists():
-                raise FileNotFoundError(f"Config file not found")
-        
-        logger.info(f"📊 Loading config from: {config_file}")
-        
-        # Read the unified control panel
-        df = pd.read_excel(config_file, sheet_name=0)  # First sheet
-        
-        # Detect column names (support both Hebrew and English)
+
+        df = pd.read_excel(config_file, sheet_name=0)
         col_mapping = {}
         for col in df.columns:
             col_lower = str(col).lower().strip()
@@ -102,594 +310,480 @@ class Arbiclod1:
                 col_mapping['setting'] = col
             elif 'ערך' in col_lower or 'value' in col_lower:
                 col_mapping['value'] = col
-        
-        # Check if we found the columns
+
         if 'setting' not in col_mapping or 'value' not in col_mapping:
-            logger.error(f"Could not find required columns. Available columns: {df.columns.tolist()}")
-            raise ValueError("Missing required columns in Excel file")
-        
-        setting_col = col_mapping['setting']
-        value_col = col_mapping['value']
-        
-        # Parse settings
-        self.config = {
-            'settings': {},
-            'exchanges': {},
-            'symbols': {}
-        }
-        
+            raise ValueError("Missing columns in Excel")
+
+        sc = col_mapping['setting']
+        vc = col_mapping['value']
+        self.config = {'settings': {}, 'exchanges': {}, 'symbols': {}}
         current_section = None
+
         for _, row in df.iterrows():
-            if pd.isna(row[setting_col]):
+            if pd.isna(row[sc]):
                 continue
-                
-            setting = str(row[setting_col]).strip()
-            
-            # Detect sections (support both English and Hebrew)
-            if '🤖' in setting or 'BOT CONFIGURATION' in setting or 'הגדרות בוט' in setting:
+            setting = str(row[sc]).strip()
+
+            if '🤖' in setting or 'BOT' in setting:
                 current_section = 'settings'
                 continue
-            elif '⚙️' in setting or 'SCANNING' in setting or 'הגדרות סריקה' in setting:
+            elif '⚙️' in setting or 'SCAN' in setting:
                 current_section = 'settings'
                 continue
-            elif '🏦' in setting or 'EXCHANGES' in setting or 'בורסות למעקב' in setting:
+            elif '🏦' in setting or 'EXCHANGE' in setting:
                 current_section = 'exchanges'
                 continue
-            elif '💰' in setting or 'SYMBOLS' in setting or 'מטבעות למעקב' in setting:
+            elif '💰' in setting or 'SYMBOL' in setting:
                 current_section = 'symbols'
                 continue
-            elif '📖' in setting or 'HOW TO USE' in setting or 'הוראות שימוש' in setting:
+            elif '📖' in setting:
                 break
-            
-            # Parse values
+
             if current_section == 'settings':
-                value = row[value_col]
-                self.config['settings'][setting] = value
-            elif current_section == 'exchanges':
-                enabled = str(row[value_col]).strip().upper() == 'V'
-                if enabled:
-                    self.config['exchanges'][setting] = True
-            elif current_section == 'symbols':
-                enabled = str(row[value_col]).strip().upper() == 'V'
-                if enabled:
-                    self.config['symbols'][setting] = True
-    
-    def load_config_from_google_sheets(self):
-        """Load from Google Sheets"""
-        import pandas as pd
-        
-        logger.info("📊 Loading config from Google Sheets...")
-        
-        # Extract sheet ID
-        if '/d/' in self.sheet_url:
-            sheet_id = self.sheet_url.split('/d/')[1].split('/')[0]
-        else:
-            sheet_id = self.sheet_url
-        
-        # Load the unified sheet (gid=0 for first sheet)
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid=0"
-        
-        try:
-            # Read without header, we'll use fixed positions
-            df = pd.read_csv(url, header=None)
-            
-            logger.info(f"Loaded {len(df)} rows from Google Sheets")
-            
-            self.config = {
-                'settings': {},
-                'exchanges': {},
-                'symbols': {}
-            }
-            
-            current_section = None
-            
-            # Start from row 4 (index 3) - skip title and header rows
-            for idx in range(3, len(df)):
-                row = df.iloc[idx]
-                
-                # Column A (index 0) = Setting name
-                if pd.isna(row[0]):
-                    continue
-                
-                setting = str(row[0]).strip()
-                
-                # Column B (index 1) = Value
-                value = row[1] if not pd.isna(row[1]) else ""
-                
-                # Detect sections
-                if '🤖' in setting or 'הגדרות בוט' in setting:
-                    current_section = 'settings'
-                    logger.info("📍 Found settings section")
-                    continue
-                elif '⚙️' in setting or 'הגדרות סריקה' in setting:
-                    current_section = 'settings'
-                    logger.info("📍 Found scanning settings section")
-                    continue
-                elif '🏦' in setting or 'בורסות למעקב' in setting:
-                    current_section = 'exchanges'
-                    logger.info("📍 Found exchanges section")
-                    continue
-                elif '💰' in setting or 'מטבעות למעקב' in setting:
-                    current_section = 'symbols'
-                    logger.info("📍 Found symbols section")
-                    continue
-                elif '📖' in setting or 'הוראות שימוש' in setting:
-                    logger.info("📍 Reached instructions - stopping")
-                    break
-                
-                # Skip if no section yet
-                if current_section is None:
-                    continue
-                
-                # Parse values based on section
-                if current_section == 'settings':
-                    self.config['settings'][setting] = value
-                    logger.info(f"  Setting: {setting} = {value}")
-                elif current_section == 'exchanges':
-                    enabled = str(value).strip().upper() == 'V'
-                    if enabled:
-                        self.config['exchanges'][setting] = True
-                        logger.info(f"  Exchange enabled: {setting}")
-                elif current_section == 'symbols':
-                    enabled = str(value).strip().upper() == 'V'
-                    if enabled:
-                        self.config['symbols'][setting] = True
-                        logger.info(f"  Symbol enabled: {setting}")
-                        
-        except Exception as e:
-            logger.error(f"Failed to load from Google Sheets: {e}")
-            raise
-    
+                self.config['settings'][setting] = row[vc]
+            elif current_section in ('exchanges', 'symbols'):
+                if str(row[vc]).strip().upper() == 'V':
+                    self.config[current_section][setting] = True
+
     def load_config(self):
-        """Load configuration"""
         try:
             if self.use_google_sheets:
                 self.load_config_from_google_sheets()
             else:
                 self.load_config_from_excel()
-            
-            # Calculate initial hash
+
             self.config_hash = self.calculate_config_hash()
-            
-            # Extract key settings with Hebrew mapping
-            settings = self.config['settings']
-            
-            # Hebrew to English mapping
-            hebrew_to_english = {
-                'טוקן_טלגרם': 'telegram_token',
-                'מזהה_צאט': 'telegram_chat_id',
-                'מצב_קבוצה': 'telegram_group_mode',
-                'דקות_בין_הודעות_חיים': 'heartbeat_interval_minutes',
-                'התרעה_על_שינויים': 'notify_on_config_change',
-                'שניות_בין_סריקות': 'scan_interval_seconds',
-                'אחוז_רווח_מינימלי': 'min_profit_percent',
-                'מחזור_מינימלי_דולר': 'min_volume_usd'
-            }
-            
-            # Support both Hebrew and English keys
-            def get_setting(key_en, key_he, default=''):
-                if key_he in settings:
-                    return settings[key_he]
-                elif key_en in settings:
-                    return settings[key_en]
-                return default
-            
-            self.telegram_token = get_setting('telegram_token', 'טוקן_טלגרם', '')
-            self.telegram_chat_id = get_setting('telegram_chat_id', 'מזהה_צאט', '')
-            self.group_mode = str(get_setting('telegram_group_mode', 'מצב_קבוצה', 'X')).upper() == 'V'
-            self.heartbeat_interval = int(get_setting('heartbeat_interval_minutes', 'דקות_בין_הודעות_חיים', 30))
-            self.notify_changes = str(get_setting('notify_on_config_change', 'התרעה_על_שינויים', 'V')).upper() == 'V'
-            self.scan_interval = int(get_setting('scan_interval_seconds', 'שניות_בין_סריקות', 10))
-            self.min_profit = float(get_setting('min_profit_percent', 'אחוז_רווח_מינימלי', 1.0))
-            
-            logger.info("\n" + "="*60)
-            logger.info("✅ Configuration loaded successfully!")
-            logger.info(f"   📊 Monitoring: {len(self.config['symbols'])} symbols")
-            logger.info(f"   🏦 Exchanges: {len(self.config['exchanges'])}")
-            logger.info(f"   💰 Min profit: {self.min_profit}%")
-            logger.info(f"   ⏱️  Scan interval: {self.scan_interval}s")
-            logger.info(f"   💬 Chat mode: {'Group' if self.group_mode else 'Personal'}")
-            logger.info(f"   💓 Heartbeat: {self.heartbeat_interval}min")
-            logger.info("="*60 + "\n")
-            
+            s = self.config['settings']
+
+            def get(key1, key2='', default=''):
+                return s.get(key1, s.get(key2, default))
+
+            self.telegram_token = get('token', 'טוקן_טלגרם', '')
+            self.telegram_chat_id = get('chatid', 'מזהה_צאט', '')
+            self.group_mode = (
+                str(get('מצב_קבוצה', 'group_mode', 'X')).upper() == 'V'
+            )
+            self.heartbeat_interval = int(float(
+                get('דקות_בין_הודעות_חיים', 'heartbeat_minutes', 10)
+            ))
+            self.notify_changes = (
+                str(get('התרעה_על_שינויים', 'notify_changes', 'V'))
+                .upper() == 'V'
+            )
+            self.scan_interval = int(float(
+                get('שניות_בין_סריקות', 'scan_seconds', 10)
+            ))
+            self.min_profit = float(
+                get('אחוז_רווח_מינימלי', 'min_profit', 0.5)
+            )
+            self.min_volume_usd = float(
+                get('מחזור_מינימלי_דולר', 'min_volume', 100000)
+            )
+
+            logger.info(
+                f"\n{'=' * 50}\n"
+                f"✅ Config loaded!\n"
+                f"   Token: {self.telegram_token[:20]}...\n"
+                f"   Chat ID: {self.telegram_chat_id}\n"
+                f"   Symbols: {len(self.config['symbols'])}\n"
+                f"   Exchanges: {len(self.config['exchanges'])}\n"
+                f"   Min profit: {self.min_profit}%\n"
+                f"   Min volume: ${self.min_volume_usd:,.0f}\n"
+                f"   Scan every: {self.scan_interval}s\n"
+                f"   Heartbeat: {self.heartbeat_interval}min\n"
+                f"{'=' * 50}\n"
+            )
+
         except Exception as e:
-            logger.error(f"❌ Fatal error loading config: {str(e)}")
+            logger.error(f"❌ Config error: {e}", exc_info=True)
             raise
-    
+
     def check_config_changes(self):
-        """Check if config changed and reload if needed"""
         try:
-            # Reload config
             if self.use_google_sheets:
                 self.load_config_from_google_sheets()
             else:
                 self.load_config_from_excel()
-            
-            # Calculate new hash
+
             new_hash = self.calculate_config_hash()
-            
             if new_hash != self.config_hash:
-                logger.info("⚠️  Configuration changed! Reloading...")
-                
-                # Update hash
-                old_hash = self.config_hash
+                logger.info("⚙️  Config changed!")
                 self.config_hash = new_hash
-                
-                # Update settings with Hebrew support
-                settings = self.config['settings']
-                
-                # Support both Hebrew and English keys
-                def get_setting(key_en, key_he, default=''):
-                    if key_he in settings:
-                        return settings[key_he]
-                    elif key_en in settings:
-                        return settings[key_en]
-                    return default
-                
-                self.telegram_token = get_setting('telegram_token', 'טוקן_טלגרם', '')
-                self.telegram_chat_id = get_setting('telegram_chat_id', 'מזהה_צאט', '')
-                self.group_mode = str(get_setting('telegram_group_mode', 'מצב_קבוצה', 'X')).upper() == 'V'
-                self.heartbeat_interval = int(get_setting('heartbeat_interval_minutes', 'דקות_בין_הודעות_חיים', 30))
-                self.notify_changes = str(get_setting('notify_on_config_change', 'התרעה_על_שינויים', 'V')).upper() == 'V'
-                self.scan_interval = int(get_setting('scan_interval_seconds', 'שניות_בין_סריקות', 10))
-                self.min_profit = float(get_setting('min_profit_percent', 'אחוז_רווח_מינימלי', 1.0))
-                
-                # Send notification
+                self.load_config()
+
+                # ✅ עדכן את ה-pool אם הבורסות השתנו
+                if self.exchange_pool:
+                    asyncio.create_task(self.reinitialize_pool())
+
                 if self.notify_changes:
-                    message = f"""
-⚙️ <b>CONFIG CHANGED</b>
-
-📊 Symbols: {len(self.config['symbols'])}
-🏦 Exchanges: {len(self.config['exchanges'])}
-💰 Min profit: {self.min_profit}%
-⏱️  Scan interval: {self.scan_interval}s
-
-✅ Settings reloaded successfully!
-
-🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                    """
-                    self.send_telegram(message.strip())
-                
-                logger.info("✅ Config reloaded!")
+                    self.send_telegram(
+                        f"⚙️ <b>הגדרות עודכנו!</b>\n\n"
+                        f"📊 מטבעות: {len(self.config['symbols'])}\n"
+                        f"🏦 בורסות: {len(self.config['exchanges'])}\n"
+                        f"💰 רווח מינימלי: {self.min_profit}%\n"
+                        f"✅ הבוט עודכן בהצלחה\n"
+                        f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                    )
                 return True
-                
         except Exception as e:
-            logger.error(f"Error checking config changes: {e}")
-        
+            logger.error(f"Config check error: {e}")
         return False
-    
-    def send_telegram(self, message):
-        """Send message to Telegram"""
-        if not self.telegram_token or self.telegram_token == 'YOUR_TELEGRAM_BOT_TOKEN':
-            logger.debug("Telegram not configured")
-            return False
-        
+
+    async def reinitialize_pool(self):
+        """עדכן בורסות אם השתנו"""
         try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            data = {
+            await self.exchange_pool.close_all()
+            self.exchange_pool = ExchangePool(
+                list(self.config['exchanges'].keys())
+            )
+            await self.exchange_pool.initialize()
+            logger.info("✅ Exchange pool reinitialized")
+        except Exception as e:
+            logger.error(f"Pool reinit error: {e}")
+
+    def send_telegram(self, message):
+        if not self.telegram_token:
+            logger.warning("No telegram token!")
+            return False
+        try:
+            url = (f"https://api.telegram.org/"
+                   f"bot{self.telegram_token}/sendMessage")
+            resp = requests.post(url, data={
                 'chat_id': self.telegram_chat_id,
                 'text': message,
                 'parse_mode': 'HTML'
-            }
-            response = requests.post(url, data=data, timeout=10)
-            
-            if response.status_code == 200:
+            }, timeout=10)
+            if resp.status_code == 200:
                 return True
             else:
-                logger.warning(f"Telegram error: {response.text}")
+                logger.warning(
+                    f"Telegram error {resp.status_code}: {resp.text}"
+                )
                 return False
-                
         except Exception as e:
-            logger.warning(f"Telegram send error: {str(e)}")
+            logger.warning(f"Telegram send error: {e}")
             return False
-    
+
     def send_startup_message(self):
-        """Send bot startup notification"""
-        mode = "GROUP" if self.group_mode else "PERSONAL"
-        message = f"""
-🚀 <b>ARBICLOD-1 STARTED</b>
+        mode = "קבוצה 👥" if self.group_mode else "אישי 👤"
+        exchanges = ", ".join(self.config['exchanges'].keys()).upper()
+        symbols = "\n".join(
+            f"   • {s}" for s in self.config['symbols'].keys()
+        )
 
-✅ Bot is now <b>ONLINE</b>
-📊 Monitoring {len(self.config['symbols'])} symbols
-🏦 Checking {len(self.config['exchanges'])} exchanges
-💰 Min profit threshold: {self.min_profit}%
-⏱️  Scan interval: {self.scan_interval} seconds
-💬 Mode: {mode}
-💓 Heartbeat: Every {self.heartbeat_interval} minutes
+        msg = (
+            f"🚀 <b>ARBICLOD-1 הופעל!</b>\n\n"
+            f"✅ הבוט פעיל ועובד\n\n"
+            f"⚙️ <b>הגדרות:</b>\n"
+            f"   💬 מצב: {mode}\n"
+            f"   ⏱️ סריקה כל: {self.scan_interval} שניות\n"
+            f"   💰 רווח מינימלי: {self.min_profit}%\n"
+            f"   📊 מחזור מינימלי: ${self.min_volume_usd:,.0f}\n"
+            f"   💓 דופק: כל {self.heartbeat_interval} דקות\n\n"
+            f"🏦 <b>בורסות:</b> {exchanges}\n\n"
+            f"💰 <b>מטבעות:</b>\n{symbols}\n\n"
+            f"🎯 מחפש הזדמנויות ארביטראז'...\n"
+            f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        )
+        result = self.send_telegram(msg)
+        if result:
+            logger.info("✅ Startup message sent to Telegram")
+        else:
+            logger.warning("⚠️  Could not send startup message")
 
-Ready to find arbitrage opportunities! 🎯
-
-🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-        """
-        self.send_telegram(message.strip())
-    
     def send_heartbeat(self):
-        """Send heartbeat message"""
         if self.heartbeat_interval <= 0:
             return
-        
+
         now = datetime.now()
-        if self.last_heartbeat is None or (now - self.last_heartbeat).seconds >= (self.heartbeat_interval * 60):
+        should_send = (
+            self.last_heartbeat is None or
+            (now - self.last_heartbeat).total_seconds() >=
+            self.heartbeat_interval * 60
+        )
+
+        if should_send:
             uptime = now - self.start_time
-            hours = uptime.seconds // 3600
-            minutes = (uptime.seconds % 3600) // 60
-            
-            message = f"""
-💓 <b>HEARTBEAT</b>
+            total_secs = int(uptime.total_seconds())
+            h = total_secs // 3600
+            m = (total_secs % 3600) // 60
 
-✅ Bot is <b>ALIVE</b> and running
+            exchanges = ", ".join(
+                self.exchange_pool.exchanges.keys()
+            ).upper() if self.exchange_pool else ""
 
-📊 Stats:
-• Uptime: {hours}h {minutes}m
-• Total scans: {self.total_scans}
-• Opportunities: {self.opportunities_found}
-• Last scan: Just now
-
-🕐 {now.strftime('%Y-%m-%d %H:%M:%S')}
-            """
-            self.send_telegram(message.strip())
+            msg = (
+                f"💓 <b>הבוט חי!</b>\n\n"
+                f"✅ פעיל ורץ\n\n"
+                f"📊 <b>סטטיסטיקה:</b>\n"
+                f"   ⏱️ זמן פעילות: {h}h {m}m\n"
+                f"   🔍 סריקות: {self.total_scans:,}\n"
+                f"   🎯 הזדמנויות: {self.opportunities_found:,}\n"
+                f"   ⚡ סריקה כל: {self.scan_interval}s\n\n"
+                f"🏦 בורסות: {exchanges}\n\n"
+                f"🕐 {now.strftime('%d/%m/%Y %H:%M:%S')}"
+            )
+            self.send_telegram(msg)
             self.last_heartbeat = now
-            logger.info("💓 Heartbeat sent")
-    
+            logger.info(f"💓 Heartbeat sent ({h}h {m}m uptime)")
+
+    async def fetch_price(self, exchange_name, symbol):
+        exchange = self.exchange_pool.exchanges.get(exchange_name)
+        if not exchange:
+            return None
+
+        try:
+            ticker = await asyncio.wait_for(
+                exchange.fetch_ticker(symbol),
+                timeout=5.0
+            )
+
+            if not ticker:
+                return None
+
+            ask = ticker.get('ask')
+            bid = ticker.get('bid')
+
+            if not ask or not bid:
+                return None
+            if ask <= 0 or bid <= 0:
+                return None
+            if ask < bid:
+                return None
+
+            volume = float(ticker.get('quoteVolume') or 0)
+
+            return {
+                'exchange': exchange_name,
+                'ask': float(ask),
+                'bid': float(bid),
+                'volume': volume
+            }
+
+        except asyncio.TimeoutError:
+            logger.debug(f"⏱️ Timeout: {exchange_name}/{symbol}")
+            return None
+        except Exception as e:
+            logger.debug(f"⚠️ {exchange_name}/{symbol}: {e}")
+            return None
+
     async def check_arbitrage(self, symbol):
-        """Check for REAL arbitrage opportunity using exchange APIs"""
-        import ccxt.async_support as ccxt
-        
-        prices = []
-        
-        # Fetch real prices from each exchange
-        for exchange_name in self.config['exchanges'].keys():
-            exchange = None
-            try:
-                # Initialize exchange
-                exchange_class = getattr(ccxt, exchange_name, None)
-                if not exchange_class:
-                    continue
-                    
-                exchange = exchange_class({'enableRateLimit': True})
-                
-                # Fetch ticker with timeout
-                ticker = await asyncio.wait_for(
-                    exchange.fetch_ticker(symbol),
-                    timeout=3.0  # 3 second timeout per exchange
-                )
-                
-                # Get prices and volume
-                if ticker['ask'] and ticker['bid'] and ticker['quoteVolume']:
-                    prices.append({
-                        'exchange': exchange_name,
-                        'ask': float(ticker['ask']),
-                        'bid': float(ticker['bid']),
-                        'volume': float(ticker['quoteVolume'])
-                    })
-                
-            except asyncio.TimeoutError:
-                logger.debug(f"⏱️ Timeout fetching {symbol} from {exchange_name}")
-            except Exception as e:
-                logger.debug(f"⚠️ Could not fetch {symbol} from {exchange_name}: {str(e)[:50]}")
-            finally:
-                # Always close connection
-                if exchange:
-                    try:
-                        await exchange.close()
-                    except:
-                        pass
-        
-        # Need at least 2 exchanges to compare
+        tasks = [
+            self.fetch_price(name, symbol)
+            for name in self.exchange_pool.exchanges.keys()
+        ]
+        results = await asyncio.gather(*tasks)
+        prices = [r for r in results if r is not None]
+
         if len(prices) < 2:
             return None
-        
-        # Find best buy and sell
+
+        prices = [p for p in prices if p['volume'] >= self.min_volume_usd]
+        if len(prices) < 2:
+            return None
+
         best_buy = min(prices, key=lambda x: x['ask'])
         best_sell = max(prices, key=lambda x: x['bid'])
-        
-        # Skip if same exchange
+
         if best_buy['exchange'] == best_sell['exchange']:
             return None
-        
+
         buy_price = best_buy['ask']
         sell_price = best_sell['bid']
-        profit = ((sell_price - buy_price) / buy_price) * 100
-        
-        # Only return if profit meets threshold
-        if profit >= self.min_profit:
-            return {
-                'symbol': symbol,
-                'buy_exchange': best_buy['exchange'],
-                'buy_price': buy_price,
-                'sell_exchange': best_sell['exchange'],
-                'sell_price': sell_price,
-                'profit': profit,
-                'buy_volume': best_buy['volume'],
-                'sell_volume': best_sell['volume']
-            }
-        
-        return None
-    
+        gross_pct = ((sell_price - buy_price) / buy_price) * 100
+
+        if gross_pct < self.min_profit * 0.5:
+            return None
+
+        coin = symbol.split('/')[0]
+        min_vol = min(p['volume'] for p in prices)
+        trade_usd = min(min_vol * 0.0005, 50000)
+        trade_usd = max(trade_usd, 1000)
+
+        fees = calculate_real_fees(
+            best_buy['exchange'], best_sell['exchange'],
+            coin, trade_usd, buy_price
+        )
+
+        gross_usd = trade_usd * (gross_pct / 100)
+        net_usd = gross_usd - fees['total']
+        net_pct = (net_usd / trade_usd) * 100
+
+        if net_pct < self.min_profit:
+            logger.debug(
+                f"📉 {symbol}: gross={gross_pct:.3f}% "
+                f"net={net_pct:.3f}% - below threshold"
+            )
+            return None
+
+        return {
+            'symbol': symbol,
+            'coin': coin,
+            'buy_exchange': best_buy['exchange'],
+            'buy_price': buy_price,
+            'buy_volume': best_buy['volume'],
+            'sell_exchange': best_sell['exchange'],
+            'sell_price': sell_price,
+            'sell_volume': best_sell['volume'],
+            'gross_pct': gross_pct,
+            'gross_usd': gross_usd,
+            'net_pct': net_pct,
+            'net_usd': net_usd,
+            'trade_usd': trade_usd,
+            'fees': fees,
+            'all_prices': prices
+        }
+
+    async def scan_all(self):
+        symbols = list(self.config['symbols'].keys())
+        tasks = [self.check_arbitrage(s) for s in symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        opportunities = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error(f"Scan error: {r}")
+            elif r is not None:
+                opportunities.append(r)
+
+        return opportunities
+
     def format_opportunity(self, opp):
-        """Format opportunity message in Hebrew with tradeable amounts and fees"""
-        # Format prices
-        buy_price_str = f"${opp['buy_price']:,.2f}"
-        sell_price_str = f"${opp['sell_price']:,.2f}"
-        
-        # Calculate tradeable amounts (based on 24h volume)
-        # Assume we can trade ~0.1% of 24h volume safely
-        buy_volume_usd = opp['buy_volume'] * 0.001  # 0.1% of daily volume
-        sell_volume_usd = opp['sell_volume'] * 0.001
-        
-        # Calculate coin amounts
-        buy_amount_coins = buy_volume_usd / opp['buy_price']
-        sell_amount_coins = sell_volume_usd / opp['sell_price']
-        
-        # Use the smaller amount (bottleneck)
-        max_tradeable_coins = min(buy_amount_coins, sell_amount_coins)
-        max_tradeable_usd = max_tradeable_coins * opp['buy_price']
-        
-        # Get coin symbol (e.g., BTC from BTC/USDT)
-        coin_symbol = opp['symbol'].split('/')[0]
-        
-        # Calculate fees (typical exchange fees)
-        # Buy fee: 0.1% (maker/taker on most exchanges)
-        # Sell fee: 0.1%
-        # Withdrawal fee: ~0.05% (varies, but conservative estimate)
-        buy_fee = max_tradeable_usd * 0.001  # 0.1%
-        sell_fee = max_tradeable_usd * 0.001  # 0.1%
-        withdrawal_fee = max_tradeable_usd * 0.0005  # 0.05%
-        total_fees = buy_fee + sell_fee + withdrawal_fee
-        
-        # Gross profit
-        gross_profit = max_tradeable_usd * (opp['profit'] / 100)
-        
-        # Net profit after fees
-        net_profit = gross_profit - total_fees
-        net_profit_percent = (net_profit / max_tradeable_usd) * 100
-        
-        # Format amounts
-        max_coins_str = f"{max_tradeable_coins:,.4f}"
-        max_usd_str = f"${max_tradeable_usd:,.2f}"
-        gross_profit_str = f"${gross_profit:,.2f}"
-        net_profit_str = f"${net_profit:,.2f}"
-        total_fees_str = f"${total_fees:,.2f}"
-        
-        # Choose emoji based on net profit
-        profit_emoji = "✅" if net_profit > 0 else "⚠️"
-        
-        return f"""
-🚨 <b>הזדמנות ארביטראז'!</b> 🚨
+        fees = opp['fees']
+        coin = opp['coin']
 
-💰 <b>מטבע: {opp['symbol']}</b>
+        prices_text = ""
+        for p in sorted(opp['all_prices'], key=lambda x: x['ask']):
+            tag = ""
+            if p['exchange'] == opp['buy_exchange']:
+                tag = " ← קנייה"
+            elif p['exchange'] == opp['sell_exchange']:
+                tag = " ← מכירה"
+            prices_text += (
+                f"   • {p['exchange'].upper()}: "
+                f"${p['ask']:,.4f}{tag}\n"
+            )
 
-📉 <b>קנייה ב-{opp['buy_exchange'].upper()}</b>
-   💵 מחיר: {buy_price_str}
-   📊 נפח 24 שעות: ${opp['buy_volume']:,.0f}
-   🔢 ניתן לקנות: {max_coins_str} {coin_symbol}
+        emoji = "✅" if opp['net_usd'] > 0 else "⚠️"
 
-📈 <b>מכירה ב-{opp['sell_exchange'].upper()}</b>
-   💵 מחיר: {sell_price_str}
-   📊 נפח 24 שעות: ${opp['sell_volume']:,.0f}
-   🔢 ניתן למכור: {max_coins_str} {coin_symbol}
+        return (
+            f"🚨 <b>ארביטראז': {opp['symbol']}</b> 🚨\n\n"
+            f"📊 <b>מחירים עכשיו:</b>\n"
+            f"{prices_text}\n"
+            f"📉 <b>קנייה:</b> {opp['buy_exchange'].upper()} "
+            f"@ ${opp['buy_price']:,.4f}\n"
+            f"📈 <b>מכירה:</b> {opp['sell_exchange'].upper()} "
+            f"@ ${opp['sell_price']:,.4f}\n\n"
+            f"💸 <b>סכום מומלץ: ${opp['trade_usd']:,.0f}</b>\n\n"
+            f"📊 <b>חישוב רווח:</b>\n"
+            f"   • רווח גולמי: ${opp['gross_usd']:,.2f} "
+            f"({opp['gross_pct']:.3f}%)\n"
+            f"   • עמלת קנייה ({fees['buy_fee_pct']:.2f}%): "
+            f"-${fees['buy_fee']:,.2f}\n"
+            f"   • עמלת מכירה ({fees['sell_fee_pct']:.2f}%): "
+            f"-${fees['sell_fee']:,.2f}\n"
+            f"   • עמלת משיכת {coin}: "
+            f"-${fees['withdrawal_fee']:,.2f}\n"
+            f"   ─────────────────\n"
+            f"   {emoji} <b>רווח נטו: ${opp['net_usd']:,.2f} "
+            f"({opp['net_pct']:.3f}%)</b>\n\n"
+            f"⚠️ פעל מהר - מחירים משתנים!\n"
+            f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+        )
 
-💸 <b>סכום מומלץ למסחר: {max_usd_str}</b>
-
-📊 <b>חישוב רווחיות:</b>
-   • רווח גולמי: {gross_profit_str} ({opp['profit']:.2f}%)
-   • עמלות (קנייה+מכירה+משיכה): {total_fees_str}
-   • {profit_emoji} <b>רווח נטו: {net_profit_str} ({net_profit_percent:.2f}%)</b>
-
-⚠️ <b>שים לב:</b>
-   • בדוק עמלות בפועל בבורסות
-   • מחירים משתנים במהירות
-   • זמן העברה בין בורסות: 10-30 דקות
-
-🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-        """
-    
     async def monitor_loop(self):
-        """Main monitoring loop with synchronized timing"""
-        logger.info("🤖 הבוט התחיל - מנטר שווקים")
-        logger.info(f"⏱️  בודק כל {self.scan_interval} שניות")
-        logger.info("💡 לחץ Ctrl+C לעצירה\n")
-        
-        config_check_counter = 0
-        
-        # Wait until next round time
+        logger.info("🔍 Monitor loop started")
+        config_counter = 0
+
         now = datetime.now()
-        seconds_to_wait = self.scan_interval - (now.second % self.scan_interval)
-        if seconds_to_wait > 0:
-            logger.info(f"⏰ ממתין {seconds_to_wait} שניות עד לזמן עגול הבא...")
-            await asyncio.sleep(seconds_to_wait)
-        
+        wait = self.scan_interval - (now.second % self.scan_interval)
+        if 0 < wait < self.scan_interval:
+            logger.info(f"⏰ Syncing, waiting {wait}s...")
+            await asyncio.sleep(wait)
+
         while True:
             try:
+                t_start = datetime.now()
                 self.total_scans += 1
-                timestamp = datetime.now().strftime('%H:%M:%S')
-                logger.info(f"[{timestamp}] 🔍 סריקה #{self.total_scans}")
-                
-                # Check for config changes every 5 scans
-                config_check_counter += 1
-                if config_check_counter >= 5:
+                ts = t_start.strftime('%H:%M:%S')
+
+                config_counter += 1
+                if config_counter >= 5:
                     self.check_config_changes()
-                    config_check_counter = 0
-                
-                # Send heartbeat if needed
+                    config_counter = 0
+
                 self.send_heartbeat()
-                
-                # Scan for opportunities
-                opportunities = []
-                for symbol in self.config['symbols'].keys():
-                    opp = await self.check_arbitrage(symbol)
-                    if opp:
-                        opportunities.append(opp)
-                
+
+                opportunities = await self.scan_all()
+
+                duration = (datetime.now() - t_start).total_seconds()
+
                 if opportunities:
                     self.opportunities_found += len(opportunities)
-                    
-                    # Sort by profit (best first)
-                    opportunities.sort(key=lambda x: x['profit'], reverse=True)
-                    
-                    # Take only top 5
-                    top_opportunities = opportunities[:5]
-                    
-                    logger.info(f"🎯 נמצאו {len(opportunities)} הזדמנויות! שולח את {len(top_opportunities)} הטובות ביותר")
-                    
-                    # Send each top opportunity
-                    for i, opp in enumerate(top_opportunities, 1):
-                        message = self.format_opportunity(opp)
-                        # Add ranking header
-                        rank_header = f"🏆 <b>מקום #{i} מתוך {len(opportunities)} הזדמנויות</b>\n\n"
-                        self.send_telegram(rank_header + message)
-                        
-                        # Small delay to avoid rate limiting
-                        if i < len(top_opportunities):
-                            await asyncio.sleep(0.5)
+                    logger.info(
+                        f"[{ts}] 🎯 #{self.total_scans}: "
+                        f"{len(opportunities)} opportunities! "
+                        f"({duration:.1f}s)"
+                    )
+                    for opp in opportunities:
+                        msg = self.format_opportunity(opp)
+                        print(f"\n{msg}\n")
+                        self.send_telegram(msg)
                 else:
-                    logger.info("   אין הזדמנויות")
-                
-                # Wait until next round time
-                now = datetime.now()
-                seconds_until_next = self.scan_interval - (now.second % self.scan_interval)
-                await asyncio.sleep(seconds_until_next)
-                
+                    logger.info(
+                        f"[{ts}] 🔍 #{self.total_scans}: "
+                        f"No opportunities ({duration:.1f}s)"
+                    )
+
+                elapsed = (datetime.now() - t_start).total_seconds()
+                sleep_time = max(0, self.scan_interval - elapsed)
+                await asyncio.sleep(sleep_time)
+
             except KeyboardInterrupt:
-                logger.info("\n⛔ הבוט נעצר על ידי המשתמש")
-                self.send_telegram("⛔ <b>ARBICLOD-1 נעצר</b>\n\nהבוט כובה.")
+                logger.info("⛔ Stopped")
+                self.send_telegram("⛔ <b>הבוט נעצר</b>")
                 break
             except Exception as e:
-                logger.error(f"❌ שגיאה: {str(e)}")
+                logger.error(f"Loop error: {e}", exc_info=True)
                 await asyncio.sleep(10)
-    
+
+    async def run_async(self):
+        self.exchange_pool = ExchangePool(
+            list(self.config['exchanges'].keys())
+        )
+        try:
+            await self.exchange_pool.initialize()
+            await self.monitor_loop()
+        finally:
+            await self.exchange_pool.close_all()
+
     def run(self):
-        """Start the bot with Flask server"""
-        # Start Flask server in background thread
-        logger.info("🌐 Starting Flask web server on port 8080...")
+        logger.info("🌐 Starting Flask on port 8080...")
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        
-        # Start bot
+
         try:
-            asyncio.run(self.monitor_loop())
+            asyncio.run(self.run_async())
         except KeyboardInterrupt:
-            logger.info("\n👋 Goodbye!")
+            logger.info("👋 Goodbye!")
+
 
 if __name__ == "__main__":
-    import sys
-    
     use_sheets = '--sheets' in sys.argv
-    
+    sheet_url = None
+
     if use_sheets:
-        sheet_url = None
-        for arg in sys.argv:
-            if 'docs.google.com' in arg or (len(arg) == 44 and '-' in arg):
+        for arg in sys.argv[1:]:
+            if 'docs.google.com' in arg:
                 sheet_url = arg
                 break
-        
+            if len(arg) > 20 and '/' not in arg:
+                sheet_url = arg
+                break
+
         if not sheet_url:
-            print("❌ Please provide Google Sheets URL")
-            print("Usage: python arbiclod1.py --sheets YOUR_SHEET_URL")
+            print("❌ Usage: python arbiclod1.py --sheets YOUR_SHEET_URL")
             sys.exit(1)
-        
-        bot = Arbiclod1(use_google_sheets=True, sheet_url=sheet_url)
-    else:
-        bot = Arbiclod1(use_google_sheets=False)
-    
+
+    bot = Arbiclod1(use_google_sheets=use_sheets, sheet_url=sheet_url)
     bot.run()
