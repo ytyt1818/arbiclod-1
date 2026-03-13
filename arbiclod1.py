@@ -245,7 +245,6 @@ class Arbiclod1:
             col_a = str(row[0]).strip()
             col_b = str(row[1]).strip() if not pd.isna(row[1]) else ""
 
-            # שורה 0 מיוחדת
             if idx == 0:
                 current_section = 'settings'
                 if col_b and 'ערך' in col_b:
@@ -255,7 +254,6 @@ class Arbiclod1:
                         logger.info(f"  token = {token_val[:20]}...")
                 continue
 
-            # זיהוי סקציות
             if '⚙️' in col_a or 'הגדרות סריקה' in col_a:
                 current_section = 'settings'
                 logger.info("📍 Section: scanning")
@@ -496,7 +494,6 @@ class Arbiclod1:
                 self.exchange_pool.exchanges.keys()
             ).upper() if self.exchange_pool else ""
 
-            # ✅ הוסף top 5 הזדמנויות להודעת דופק
             top_text = ""
             if top_opportunities:
                 top_text = "\n\n🏆 <b>5 ההזדמנויות הטובות ביותר:</b>\n"
@@ -595,8 +592,13 @@ class Arbiclod1:
             return None
 
         coin = symbol.split('/')[0]
-        min_vol = min(p['volume'] for p in prices)
-        trade_usd = min(min_vol * 0.0005, 50000)
+
+        # ✅ חישוב כמות לפי נפח כל בורסה בנפרד
+        buy_tradeable_usd = best_buy['volume'] * 0.0005
+        sell_tradeable_usd = best_sell['volume'] * 0.0005
+
+        # הסכום הוא המינימום בין הקנייה והמכירה
+        trade_usd = min(buy_tradeable_usd, sell_tradeable_usd, 50000)
         trade_usd = max(trade_usd, 1000)
 
         fees = calculate_real_fees(
@@ -617,9 +619,11 @@ class Arbiclod1:
             'buy_exchange': best_buy['exchange'],
             'buy_price': buy_price,
             'buy_volume': best_buy['volume'],
+            'buy_tradeable_usd': buy_tradeable_usd,
             'sell_exchange': best_sell['exchange'],
             'sell_price': sell_price,
             'sell_volume': best_sell['volume'],
+            'sell_tradeable_usd': sell_tradeable_usd,
             'gross_pct': gross_pct,
             'gross_usd': gross_usd,
             'net_pct': net_pct,
@@ -636,7 +640,6 @@ class Arbiclod1:
 
         opportunities = []
         for r in results:
-            # ✅ תיקון הבאג - סנן כל מה שלא dict תקין
             if r is None:
                 continue
             if isinstance(r, (Exception, BaseException)):
@@ -648,15 +651,14 @@ class Arbiclod1:
                 continue
             opportunities.append(r)
 
-        # ✅ מיין לפי רווח נטו - הכי טוב ראשון
         opportunities.sort(key=lambda x: x['net_pct'], reverse=True)
-
         return opportunities
 
     def format_opportunity(self, opp):
         fees = opp['fees']
         coin = opp['coin']
 
+        # מחירים של כל הבורסות
         prices_text = ""
         for p in sorted(opp['all_prices'], key=lambda x: x['ask']):
             tag = ""
@@ -671,16 +673,26 @@ class Arbiclod1:
 
         emoji = "✅" if opp['net_usd'] > 0 else "⚠️"
 
+        # ✅ כמות מטבעות לפי בורסה
+        buy_coins = opp['buy_tradeable_usd'] / opp['buy_price']
+        sell_coins = opp['sell_tradeable_usd'] / opp['sell_price']
+        trade_coins = opp['trade_usd'] / opp['buy_price']
+
         return (
             f"🚨 <b>ארביטראז': {opp['symbol']}</b> 🚨\n\n"
             f"📊 <b>מחירים עכשיו:</b>\n"
             f"{prices_text}\n"
-            f"📉 <b>קנייה:</b> {opp['buy_exchange'].upper()} "
+            f"📉 <b>קנייה: {opp['buy_exchange'].upper()}</b> "
             f"@ ${opp['buy_price']:,.4f}\n"
-            f"📈 <b>מכירה:</b> {opp['sell_exchange'].upper()} "
-            f"@ ${opp['sell_price']:,.4f}\n\n"
-            f"💸 <b>סכום מומלץ: ${opp['trade_usd']:,.0f}</b>\n\n"
-            f"📊 <b>חישוב רווח:</b>\n"
+            f"   💵 ניתן לקנות: ${opp['buy_tradeable_usd']:,.0f} "
+            f"({buy_coins:,.2f} {coin})\n\n"
+            f"📈 <b>מכירה: {opp['sell_exchange'].upper()}</b> "
+            f"@ ${opp['sell_price']:,.4f}\n"
+            f"   💵 ניתן למכור: ${opp['sell_tradeable_usd']:,.0f} "
+            f"({sell_coins:,.2f} {coin})\n\n"
+            f"💸 <b>סכום עסקה מומלץ: ${opp['trade_usd']:,.0f}</b>\n"
+            f"   🔢 כמות: {trade_coins:,.4f} {coin}\n\n"
+            f"📊 <b>חישוב רווח על ${opp['trade_usd']:,.0f}:</b>\n"
             f"   • רווח גולמי: ${opp['gross_usd']:,.2f} "
             f"({opp['gross_pct']:.3f}%)\n"
             f"   • עמלת קנייה ({fees['buy_fee_pct']:.2f}%): "
@@ -718,7 +730,6 @@ class Arbiclod1:
                     self.check_config_changes()
                     config_counter = 0
 
-                # ✅ העבר top הזדמנויות להודעת דופק
                 self.send_heartbeat(top_opportunities=last_opportunities)
 
                 opportunities = await self.scan_all()
@@ -733,7 +744,7 @@ class Arbiclod1:
                         f"{len(opportunities)} opportunities! "
                         f"({duration:.1f}s)"
                     )
-                    # ✅ שלח רק 5 הטובות ביותר
+                    # ✅ שלח רק Top 5
                     for opp in opportunities[:5]:
                         msg = self.format_opportunity(opp)
                         print(f"\n{msg}\n")
@@ -741,7 +752,7 @@ class Arbiclod1:
 
                     if len(opportunities) > 5:
                         logger.info(
-                            f"   (showing top 5 of {len(opportunities)})"
+                            f"   (top 5 of {len(opportunities)} sent)"
                         )
                 else:
                     logger.info(
