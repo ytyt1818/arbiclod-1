@@ -113,6 +113,24 @@ EXCHANGE_FEES = {
             'BTC': 0.0, 'ETH': 0.0, 'SOL': 0.0,
             'DEFAULT_PCT': 0.001
         }
+    },
+    # ✅ חדש
+    'huobi': {
+        'taker': 0.002,
+        'withdrawal': {
+            'BTC': 0.0004, 'ETH': 0.004, 'BNB': 0.001,
+            'SOL': 0.01, 'XRP': 0.2, 'USDT': 1.0,
+            'DEFAULT_PCT': 0.002
+        }
+    },
+    # ✅ חדש
+    'bitfinex': {
+        'taker': 0.002,
+        'withdrawal': {
+            'BTC': 0.0004, 'ETH': 0.004, 'BNB': 0.001,
+            'SOL': 0.01, 'XRP': 0.2, 'USDT': 1.0,
+            'DEFAULT_PCT': 0.002
+        }
     }
 }
 
@@ -160,6 +178,8 @@ class ExchangePool:
             'gate': ccxt.gate,
             'mexc': ccxt.mexc,
             'okx': ccxt.okx,
+            'huobi': ccxt.huobi,       # ✅ חדש
+            'bitfinex': ccxt.bitfinex,  # ✅ חדש
         }
 
         for name in self.exchange_names:
@@ -173,6 +193,8 @@ class ExchangePool:
                     logger.info(f"✅ Connected: {name}")
                 except Exception as e:
                     logger.error(f"❌ Failed {name}: {e}")
+            else:
+                logger.warning(f"⚠️ Unknown exchange: {name}")
 
         logger.info(f"🏦 Pool ready: {list(self.exchanges.keys())}")
 
@@ -496,15 +518,18 @@ class Arbiclod1:
 
             top_text = ""
             if top_opportunities:
-                top_text = "\n\n🏆 <b>5 ההזדמנויות הטובות ביותר:</b>\n"
+                top_text = "\n\n🏆 <b>הזדמנויות אחרונות:</b>\n"
                 for i, opp in enumerate(top_opportunities[:5], 1):
                     top_text += (
-                        f"   {i}. {opp['symbol']}: "
-                        f"{opp['net_pct']:.3f}% נטו "
-                        f"(${opp['net_usd']:,.0f}) "
-                        f"{opp['buy_exchange'].upper()}→"
-                        f"{opp['sell_exchange'].upper()}\n"
+                        f"   {i}. <b>{opp['symbol']}</b>\n"
+                        f"      📉 {opp['buy_exchange'].upper()} "
+                        f"→ 📈 {opp['sell_exchange'].upper()}\n"
+                        f"      💵 סכום: ${opp['trade_usd']:,.0f}\n"
+                        f"      ✅ רווח נטו: ${opp['net_usd']:,.2f} "
+                        f"({opp['net_pct']:.3f}%)\n\n"
                     )
+            else:
+                top_text = "\n\n📊 אין הזדמנויות בסריקה האחרונה\n"
 
             msg = (
                 f"💓 <b>הבוט חי!</b>\n\n"
@@ -516,7 +541,7 @@ class Arbiclod1:
                 f"   ⚡ סריקה כל: {self.scan_interval}s\n"
                 f"   💰 רווח מינימלי: {self.min_profit}%\n\n"
                 f"🏦 בורסות: {exchanges}"
-                f"{top_text}\n\n"
+                f"{top_text}\n"
                 f"🕐 {now.strftime('%d/%m/%Y %H:%M:%S')}"
             )
             self.send_telegram(msg)
@@ -593,11 +618,8 @@ class Arbiclod1:
 
         coin = symbol.split('/')[0]
 
-        # ✅ חישוב כמות לפי נפח כל בורסה בנפרד
         buy_tradeable_usd = best_buy['volume'] * 0.0005
         sell_tradeable_usd = best_sell['volume'] * 0.0005
-
-        # הסכום הוא המינימום בין הקנייה והמכירה
         trade_usd = min(buy_tradeable_usd, sell_tradeable_usd, 50000)
         trade_usd = max(trade_usd, 1000)
 
@@ -658,7 +680,6 @@ class Arbiclod1:
         fees = opp['fees']
         coin = opp['coin']
 
-        # מחירים של כל הבורסות
         prices_text = ""
         for p in sorted(opp['all_prices'], key=lambda x: x['ask']):
             tag = ""
@@ -673,7 +694,6 @@ class Arbiclod1:
 
         emoji = "✅" if opp['net_usd'] > 0 else "⚠️"
 
-        # ✅ כמות מטבעות לפי בורסה
         buy_coins = opp['buy_tradeable_usd'] / opp['buy_price']
         sell_coins = opp['sell_tradeable_usd'] / opp['sell_price']
         trade_coins = opp['trade_usd'] / opp['buy_price']
@@ -744,7 +764,6 @@ class Arbiclod1:
                         f"{len(opportunities)} opportunities! "
                         f"({duration:.1f}s)"
                     )
-                    # ✅ שלח רק Top 5
                     for opp in opportunities[:5]:
                         msg = self.format_opportunity(opp)
                         print(f"\n{msg}\n")
