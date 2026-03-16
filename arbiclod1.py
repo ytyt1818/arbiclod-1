@@ -1,12 +1,14 @@
 """
 Arbiclod-1 - Enhanced Crypto Arbitrage Bot
+Memory Optimized Version
 """
 import asyncio
 import hashlib
 import logging
 import os
 import sys
-from datetime import datetime
+import gc
+from datetime import datetime, timedelta
 from threading import Thread
 
 # ✅ שעון ישראל
@@ -114,7 +116,6 @@ EXCHANGE_FEES = {
             'DEFAULT_PCT': 0.001
         }
     },
-    # ✅ חדש
     'huobi': {
         'taker': 0.002,
         'withdrawal': {
@@ -123,7 +124,6 @@ EXCHANGE_FEES = {
             'DEFAULT_PCT': 0.002
         }
     },
-    # ✅ חדש
     'bitfinex': {
         'taker': 0.002,
         'withdrawal': {
@@ -139,16 +139,13 @@ def calculate_real_fees(buy_exchange, sell_exchange,
                         coin_symbol, trade_usd, buy_price):
     buy_cfg = EXCHANGE_FEES.get(buy_exchange, EXCHANGE_FEES['binance'])
     sell_cfg = EXCHANGE_FEES.get(sell_exchange, EXCHANGE_FEES['binance'])
-
     buy_fee = trade_usd * buy_cfg['taker']
     sell_fee = trade_usd * sell_cfg['taker']
-
     wd = buy_cfg['withdrawal']
     if coin_symbol in wd:
         withdrawal_fee = wd[coin_symbol] * buy_price
     else:
         withdrawal_fee = trade_usd * wd.get('DEFAULT_PCT', 0.001)
-
     total = buy_fee + sell_fee + withdrawal_fee
     return {
         'buy_fee': buy_fee,
@@ -165,9 +162,13 @@ class ExchangePool:
     def __init__(self, exchange_names):
         self.exchange_names = exchange_names
         self.exchanges = {}
+        self.semaphore = None
 
     async def initialize(self):
         import ccxt.async_support as ccxt
+
+        # ✅ סמפור להגבלת בקשות מקביליות
+        self.semaphore = asyncio.Semaphore(15)
 
         classes = {
             'binance': ccxt.binance,
@@ -178,8 +179,8 @@ class ExchangePool:
             'gate': ccxt.gate,
             'mexc': ccxt.mexc,
             'okx': ccxt.okx,
-            'huobi': ccxt.huobi,       # ✅ חדש
-            'bitfinex': ccxt.bitfinex,  # ✅ חדש
+            'huobi': ccxt.huobi,
+            'bitfinex': ccxt.bitfinex,
         }
 
         for name in self.exchange_names:
@@ -199,7 +200,7 @@ class ExchangePool:
         logger.info(f"🏦 Pool ready: {list(self.exchanges.keys())}")
 
     async def close_all(self):
-        for name, ex in self.exchanges.items():
+        for ex in self.exchanges.values():
             try:
                 await ex.close()
             except Exception:
@@ -214,6 +215,7 @@ class Arbiclod1:
         self.config = {}
         self.config_hash = None
         self.last_heartbeat = None
+        self.last_pool_refresh = datetime.now()
         self.opportunities_found = 0
         self.total_scans = 0
         self.start_time = datetime.now()
@@ -246,8 +248,6 @@ class Arbiclod1:
         url = (f"https://docs.google.com/spreadsheets/d/"
                f"{sheet_id}/gviz/tq?tqx=out:csv&gid=0")
 
-        logger.info(f"URL: {url}")
-
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
             raise Exception(f"Failed to load sheet: {resp.status_code}")
@@ -260,7 +260,6 @@ class Arbiclod1:
 
         for idx in range(len(df)):
             row = df.iloc[idx]
-
             if pd.isna(row[0]):
                 continue
 
@@ -268,28 +267,22 @@ class Arbiclod1:
             col_b = str(row[1]).strip() if not pd.isna(row[1]) else ""
 
             if idx == 0:
-                current_section = 'settings'
                 if col_b and 'ערך' in col_b:
                     token_val = col_b.replace('ערך', '').strip()
                     if token_val:
                         self.config['settings']['token'] = token_val
-                        logger.info(f"  token = {token_val[:20]}...")
                 continue
 
             if '⚙️' in col_a or 'הגדרות סריקה' in col_a:
                 current_section = 'settings'
-                logger.info("📍 Section: scanning")
                 continue
             elif '🏦' in col_a or 'בורסות למעקב' in col_a:
                 current_section = 'exchanges'
-                logger.info("📍 Section: exchanges")
                 continue
             elif '💰' in col_a or 'מטבעות למעקב' in col_a:
                 current_section = 'symbols'
-                logger.info("📍 Section: symbols")
                 continue
             elif '📖' in col_a or 'הוראות שימוש' in col_a:
-                logger.info("📍 Stop - instructions")
                 break
 
             if not col_a or col_a == 'ריק':
@@ -297,7 +290,6 @@ class Arbiclod1:
 
             if current_section == 'settings':
                 self.config['settings'][col_a] = col_b
-                logger.info(f"  Setting: {col_a} = {col_b}")
             elif current_section == 'exchanges':
                 if col_b.upper() == 'V':
                     self.config['exchanges'][col_a] = True
@@ -308,8 +300,7 @@ class Arbiclod1:
                     logger.info(f"  Symbol ON: {col_a}")
 
         logger.info(
-            f"✅ Loaded: "
-            f"{len(self.config['settings'])} settings, "
+            f"✅ Loaded: {len(self.config['settings'])} settings, "
             f"{len(self.config['exchanges'])} exchanges, "
             f"{len(self.config['symbols'])} symbols"
         )
@@ -331,9 +322,6 @@ class Arbiclod1:
             elif 'ערך' in col_lower or 'value' in col_lower:
                 col_mapping['value'] = col
 
-        if 'setting' not in col_mapping or 'value' not in col_mapping:
-            raise ValueError("Missing columns in Excel")
-
         sc = col_mapping['setting']
         vc = col_mapping['value']
         self.config = {'settings': {}, 'exchanges': {}, 'symbols': {}}
@@ -344,16 +332,16 @@ class Arbiclod1:
                 continue
             setting = str(row[sc]).strip()
 
-            if '🤖' in setting or 'BOT' in setting:
+            if '🤖' in setting:
                 current_section = 'settings'
                 continue
-            elif '⚙️' in setting or 'SCAN' in setting:
+            elif '⚙️' in setting:
                 current_section = 'settings'
                 continue
-            elif '🏦' in setting or 'EXCHANGE' in setting:
+            elif '🏦' in setting:
                 current_section = 'exchanges'
                 continue
-            elif '💰' in setting or 'SYMBOL' in setting:
+            elif '💰' in setting:
                 current_section = 'symbols'
                 continue
             elif '📖' in setting:
@@ -384,20 +372,20 @@ class Arbiclod1:
                 str(get('מצב_קבוצה', 'group_mode', 'X')).upper() == 'V'
             )
             self.heartbeat_interval = int(float(
-                get('דקות_בין_הודעות_חיים', 'heartbeat_minutes', 10)
+                get('דקות_בין_הודעות_חיים', 'heartbeat_minutes', 20)
             ))
             self.notify_changes = (
                 str(get('התרעה_על_שינויים', 'notify_changes', 'V'))
                 .upper() == 'V'
             )
             self.scan_interval = int(float(
-                get('שניות_בין_סריקות', 'scan_seconds', 10)
+                get('שניות_בין_סריקות', 'scan_seconds', 15)
             ))
             self.min_profit = float(
-                get('אחוז_רווח_מינימלי', 'min_profit', 0.5)
+                get('אחוז_רווח_מינימלי', 'min_profit', 0.1)
             )
             self.min_volume_usd = float(
-                get('מחזור_מינימלי_דולר', 'min_volume', 100000)
+                get('מחזור_מינימלי_דולר', 'min_volume', 10000)
             )
 
             logger.info(
@@ -447,7 +435,6 @@ class Arbiclod1:
 
     def send_telegram(self, message):
         if not self.telegram_token:
-            logger.warning("No telegram token!")
             return False
         try:
             url = (f"https://api.telegram.org/"
@@ -457,15 +444,9 @@ class Arbiclod1:
                 'text': message,
                 'parse_mode': 'HTML'
             }, timeout=10)
-            if resp.status_code == 200:
-                return True
-            else:
-                logger.warning(
-                    f"Telegram error {resp.status_code}: {resp.text}"
-                )
-                return False
+            return resp.status_code == 200
         except Exception as e:
-            logger.warning(f"Telegram send error: {e}")
+            logger.warning(f"Telegram error: {e}")
             return False
 
     def send_startup_message(self):
@@ -474,8 +455,7 @@ class Arbiclod1:
         symbols = "\n".join(
             f"   • {s}" for s in self.config['symbols'].keys()
         )
-
-        msg = (
+        self.send_telegram(
             f"🚀 <b>ARBICLOD-1 הופעל!</b>\n\n"
             f"✅ הבוט פעיל ועובד\n\n"
             f"⚙️ <b>הגדרות:</b>\n"
@@ -489,11 +469,7 @@ class Arbiclod1:
             f"🎯 מחפש הזדמנויות ארביטראז'...\n"
             f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
         )
-        result = self.send_telegram(msg)
-        if result:
-            logger.info("✅ Startup message sent to Telegram")
-        else:
-            logger.warning("⚠️  Could not send startup message")
+        logger.info("✅ Startup message sent")
 
     def send_heartbeat(self, top_opportunities=None):
         if self.heartbeat_interval <= 0:
@@ -506,87 +482,74 @@ class Arbiclod1:
             self.heartbeat_interval * 60
         )
 
-        if should_send:
-            uptime = now - self.start_time
-            total_secs = int(uptime.total_seconds())
-            h = total_secs // 3600
-            m = (total_secs % 3600) // 60
+        if not should_send:
+            return
 
-            exchanges = ", ".join(
-                self.exchange_pool.exchanges.keys()
-            ).upper() if self.exchange_pool else ""
+        uptime = now - self.start_time
+        total_secs = int(uptime.total_seconds())
+        h = total_secs // 3600
+        m = (total_secs % 3600) // 60
 
-            top_text = ""
-            if top_opportunities:
-                top_text = "\n\n🏆 <b>הזדמנויות אחרונות:</b>\n"
-                for i, opp in enumerate(top_opportunities[:5], 1):
-                    top_text += (
-                        f"   {i}. <b>{opp['symbol']}</b>\n"
-                        f"      📉 {opp['buy_exchange'].upper()} "
-                        f"→ 📈 {opp['sell_exchange'].upper()}\n"
-                        f"      💵 סכום: ${opp['trade_usd']:,.0f}\n"
-                        f"      ✅ רווח נטו: ${opp['net_usd']:,.2f} "
-                        f"({opp['net_pct']:.3f}%)\n\n"
-                    )
-            else:
-                top_text = "\n\n📊 אין הזדמנויות בסריקה האחרונה\n"
+        exchanges = ", ".join(
+            self.exchange_pool.exchanges.keys()
+        ).upper() if self.exchange_pool else ""
 
-            msg = (
-                f"💓 <b>הבוט חי!</b>\n\n"
-                f"✅ פעיל ורץ\n\n"
-                f"📊 <b>סטטיסטיקה:</b>\n"
-                f"   ⏱️ זמן פעילות: {h}h {m}m\n"
-                f"   🔍 סריקות: {self.total_scans:,}\n"
-                f"   🎯 הזדמנויות: {self.opportunities_found:,}\n"
-                f"   ⚡ סריקה כל: {self.scan_interval}s\n"
-                f"   💰 רווח מינימלי: {self.min_profit}%\n\n"
-                f"🏦 בורסות: {exchanges}"
-                f"{top_text}\n"
-                f"🕐 {now.strftime('%d/%m/%Y %H:%M:%S')}"
-            )
-            self.send_telegram(msg)
-            self.last_heartbeat = now
-            logger.info(f"💓 Heartbeat sent ({h}h {m}m uptime)")
+        top_text = ""
+        if top_opportunities:
+            top_text = "\n\n🏆 <b>הזדמנויות אחרונות:</b>\n"
+            for i, opp in enumerate(top_opportunities[:5], 1):
+                top_text += (
+                    f"   {i}. <b>{opp['symbol']}</b>\n"
+                    f"      📉 {opp['buy_exchange'].upper()} "
+                    f"→ 📈 {opp['sell_exchange'].upper()}\n"
+                    f"      💵 סכום: ${opp['trade_usd']:,.0f}\n"
+                    f"      ✅ רווח נטו: ${opp['net_usd']:,.2f} "
+                    f"({opp['net_pct']:.3f}%)\n\n"
+                )
+        else:
+            top_text = "\n\n📊 אין הזדמנויות בסריקה האחרונה\n"
+
+        self.send_telegram(
+            f"💓 <b>הבוט חי!</b>\n\n"
+            f"✅ פעיל ורץ\n\n"
+            f"📊 <b>סטטיסטיקה:</b>\n"
+            f"   ⏱️ זמן פעילות: {h}h {m}m\n"
+            f"   🔍 סריקות: {self.total_scans:,}\n"
+            f"   🎯 הזדמנויות: {self.opportunities_found:,}\n"
+            f"   ⚡ סריקה כל: {self.scan_interval}s\n"
+            f"   💰 רווח מינימלי: {self.min_profit}%\n\n"
+            f"🏦 בורסות: {exchanges}"
+            f"{top_text}\n"
+            f"🕐 {now.strftime('%d/%m/%Y %H:%M:%S')}"
+        )
+        self.last_heartbeat = now
+        logger.info(f"💓 Heartbeat sent ({h}h {m}m uptime)")
 
     async def fetch_price(self, exchange_name, symbol):
-        exchange = self.exchange_pool.exchanges.get(exchange_name)
-        if not exchange:
-            return None
-
-        try:
-            ticker = await asyncio.wait_for(
-                exchange.fetch_ticker(symbol),
-                timeout=5.0
-            )
-
-            if not ticker:
+        # ✅ סמפור - מגביל עומס זיכרון
+        async with self.exchange_pool.semaphore:
+            exchange = self.exchange_pool.exchanges.get(exchange_name)
+            if not exchange:
                 return None
-
-            ask = ticker.get('ask')
-            bid = ticker.get('bid')
-
-            if not ask or not bid:
+            try:
+                ticker = await asyncio.wait_for(
+                    exchange.fetch_ticker(symbol),
+                    timeout=6.0
+                )
+                if not ticker:
+                    return None
+                ask = ticker.get('ask')
+                bid = ticker.get('bid')
+                if not ask or not bid or ask <= 0 or bid <= 0:
+                    return None
+                return {
+                    'exchange': exchange_name,
+                    'ask': float(ask),
+                    'bid': float(bid),
+                    'volume': float(ticker.get('quoteVolume') or 0)
+                }
+            except Exception:
                 return None
-            if ask <= 0 or bid <= 0:
-                return None
-            if ask < bid:
-                return None
-
-            volume = float(ticker.get('quoteVolume') or 0)
-
-            return {
-                'exchange': exchange_name,
-                'ask': float(ask),
-                'bid': float(bid),
-                'volume': volume
-            }
-
-        except asyncio.TimeoutError:
-            logger.debug(f"⏱️ Timeout: {exchange_name}/{symbol}")
-            return None
-        except Exception as e:
-            logger.debug(f"⚠️ {exchange_name}/{symbol}: {e}")
-            return None
 
     async def check_arbitrage(self, symbol):
         tasks = [
@@ -594,12 +557,11 @@ class Arbiclod1:
             for name in self.exchange_pool.exchanges.keys()
         ]
         results = await asyncio.gather(*tasks)
-        prices = [r for r in results if r is not None]
+        prices = [
+            r for r in results
+            if r is not None and r['volume'] >= self.min_volume_usd
+        ]
 
-        if len(prices) < 2:
-            return None
-
-        prices = [p for p in prices if p['volume'] >= self.min_volume_usd]
         if len(prices) < 2:
             return None
 
@@ -617,11 +579,9 @@ class Arbiclod1:
             return None
 
         coin = symbol.split('/')[0]
-
-        buy_tradeable_usd = best_buy['volume'] * 0.0005
-        sell_tradeable_usd = best_sell['volume'] * 0.0005
-        trade_usd = min(buy_tradeable_usd, sell_tradeable_usd, 50000)
-        trade_usd = max(trade_usd, 1000)
+        buy_tradeable = best_buy['volume'] * 0.0005
+        sell_tradeable = best_sell['volume'] * 0.0005
+        trade_usd = max(1000, min(buy_tradeable, sell_tradeable, 50000))
 
         fees = calculate_real_fees(
             best_buy['exchange'], best_sell['exchange'],
@@ -641,11 +601,11 @@ class Arbiclod1:
             'buy_exchange': best_buy['exchange'],
             'buy_price': buy_price,
             'buy_volume': best_buy['volume'],
-            'buy_tradeable_usd': buy_tradeable_usd,
+            'buy_tradeable_usd': buy_tradeable,
             'sell_exchange': best_sell['exchange'],
             'sell_price': sell_price,
             'sell_volume': best_sell['volume'],
-            'sell_tradeable_usd': sell_tradeable_usd,
+            'sell_tradeable_usd': sell_tradeable,
             'gross_pct': gross_pct,
             'gross_usd': gross_usd,
             'net_pct': net_pct,
@@ -654,27 +614,6 @@ class Arbiclod1:
             'fees': fees,
             'all_prices': prices
         }
-
-    async def scan_all(self):
-        symbols = list(self.config['symbols'].keys())
-        tasks = [self.check_arbitrage(s) for s in symbols]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        opportunities = []
-        for r in results:
-            if r is None:
-                continue
-            if isinstance(r, (Exception, BaseException)):
-                logger.debug(f"Scan skip: {type(r).__name__}")
-                continue
-            if not isinstance(r, dict):
-                continue
-            if 'fees' not in r or 'net_pct' not in r:
-                continue
-            opportunities.append(r)
-
-        opportunities.sort(key=lambda x: x['net_pct'], reverse=True)
-        return opportunities
 
     def format_opportunity(self, opp):
         fees = opp['fees']
@@ -693,7 +632,6 @@ class Arbiclod1:
             )
 
         emoji = "✅" if opp['net_usd'] > 0 else "⚠️"
-
         buy_coins = opp['buy_tradeable_usd'] / opp['buy_price']
         sell_coins = opp['sell_tradeable_usd'] / opp['sell_price']
         trade_coins = opp['trade_usd'] / opp['buy_price']
@@ -736,7 +674,6 @@ class Arbiclod1:
         now = datetime.now()
         wait = self.scan_interval - (now.second % self.scan_interval)
         if 0 < wait < self.scan_interval:
-            logger.info(f"⏰ Syncing, waiting {wait}s...")
             await asyncio.sleep(wait)
 
         while True:
@@ -745,14 +682,44 @@ class Arbiclod1:
                 self.total_scans += 1
                 ts = t_start.strftime('%H:%M:%S')
 
+                # ✅ רענון pool כל שעה למניעת דליפת זיכרון
+                if datetime.now() - self.last_pool_refresh > timedelta(hours=1):
+                    logger.info("♻️ Refreshing Exchange Pool...")
+                    await self.exchange_pool.close_all()
+                    await self.exchange_pool.initialize()
+                    self.last_pool_refresh = datetime.now()
+
+                # בדוק שינויי קונפיג כל 5 סריקות
                 config_counter += 1
                 if config_counter >= 5:
                     self.check_config_changes()
                     config_counter = 0
 
+                # שלח דופק
                 self.send_heartbeat(top_opportunities=last_opportunities)
 
-                opportunities = await self.scan_all()
+                # סרוק כל המטבעות
+                tasks = [
+                    self.check_arbitrage(s)
+                    for s in self.config['symbols'].keys()
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                opportunities = []
+                for r in results:
+                    if r is None:
+                        continue
+                    if isinstance(r, (Exception, BaseException)):
+                        continue
+                    if not isinstance(r, dict):
+                        continue
+                    if 'fees' not in r or 'net_pct' not in r:
+                        continue
+                    opportunities.append(r)
+
+                opportunities.sort(
+                    key=lambda x: x['net_pct'], reverse=True
+                )
                 last_opportunities = opportunities
 
                 duration = (datetime.now() - t_start).total_seconds()
@@ -764,23 +731,20 @@ class Arbiclod1:
                         f"{len(opportunities)} opportunities! "
                         f"({duration:.1f}s)"
                     )
-                    for opp in opportunities[:5]:
+                    for opp in opportunities[:3]:
                         msg = self.format_opportunity(opp)
-                        print(f"\n{msg}\n")
                         self.send_telegram(msg)
-
-                    if len(opportunities) > 5:
-                        logger.info(
-                            f"   (top 5 of {len(opportunities)} sent)"
-                        )
                 else:
                     logger.info(
                         f"[{ts}] 🔍 #{self.total_scans}: "
                         f"No opportunities ({duration:.1f}s)"
                     )
 
+                # ✅ ניקוי זיכרון
+                gc.collect()
+
                 elapsed = (datetime.now() - t_start).total_seconds()
-                sleep_time = max(0, self.scan_interval - elapsed)
+                sleep_time = max(1, self.scan_interval - elapsed)
                 await asyncio.sleep(sleep_time)
 
             except KeyboardInterrupt:
@@ -805,7 +769,6 @@ class Arbiclod1:
         logger.info("🌐 Starting Flask on port 8080...")
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
-
         try:
             asyncio.run(self.run_async())
         except KeyboardInterrupt:
